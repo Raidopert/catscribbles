@@ -188,13 +188,30 @@ async function openShareModal() {
   $('#share-link').textContent = link;
   const qrWrap = $('#qr-wrap');
   qrWrap.innerHTML = '';
-  try {
-    const canvas = document.createElement('canvas');
-    await QRCode.toCanvas(canvas, link, { width: 200, margin: 1, color: { dark: '#0a0d12', light: '#ffffff' } });
-    qrWrap.appendChild(canvas);
-  } catch (e) {
-    console.warn('QR generation failed', e);
-    qrWrap.textContent = 'QR недоступен';
+  const hasDrawing = state.yStrokes && state.yStrokes.length > 0;
+  // QR теряет читаемость на длинных ссылках (рисунок в hash). До ~1200 символов — рисуем.
+  if (link.length > 1200) {
+    qrWrap.textContent = 'Рисунок большой — QR не уместится. Скопируйте ссылку выше.';
+    qrWrap.style.color = 'var(--text-mute)';
+    qrWrap.style.fontSize = '.82rem';
+    qrWrap.style.background = 'transparent';
+    qrWrap.style.padding = '12px';
+    qrWrap.style.textAlign = 'center';
+  } else {
+    try {
+      const canvas = document.createElement('canvas');
+      await QRCode.toCanvas(canvas, link, { width: 200, margin: 1, color: { dark: '#0a0d12', light: '#ffffff' } });
+      qrWrap.appendChild(canvas);
+    } catch (e) {
+      console.warn('QR generation failed', e);
+      qrWrap.textContent = 'QR недоступен';
+    }
+  }
+  const hint = document.getElementById('share-hint');
+  if (hint) {
+    hint.innerHTML = hasDrawing
+      ? 'В ссылке уже зашит ваш рисунок — друг увидит его, <b>даже если вы уже закрыли приложение</b>. Если оба онлайн — рисуете вместе вживую.'
+      : 'Покажите код или QR второму человеку. На телефоне QR удобно сканировать камерой.';
   }
   shareModal.classList.add('show');
 }
@@ -213,8 +230,71 @@ $$('[data-copy]').forEach(btn => {
 });
 
 function buildRoomLink() {
-  const base = location.origin + location.pathname;
-  return base + '#room=' + encodeURIComponent(state.roomCode);
+  // Гарантируем, что в hash лежит свежий snapshot (если есть штрихи) —
+  // тогда скопированная ссылка несёт рисунок как «заметку».
+  updateHashWithSnapshot();
+  return location.origin + location.pathname + location.hash;
+}
+
+// ============ Persistence: рисунок живёт в URL hash ============
+// В чистом P2P нет сервера, поэтому «заметка для того, кто откроет ссылку позже»
+// кодируется прямо в hash: #room=CS-XXXXXX&d=<base64url(Y.encodeStateAsUpdate)>.
+// Live-синхрон (nostr) работает поверх, когда оба онлайн; snapshot — асинхронный фолбэк.
+function bytesToB64Url(bytes) {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64UrlToBytes(str) {
+  let s = String(str).replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+function encodeSnapshot() {
+  try {
+    if (!state.ydoc) return '';
+    const u = Y.encodeStateAsUpdate(state.ydoc);
+    return bytesToB64Url(u);
+  } catch (e) { console.warn('encodeSnapshot', e); return ''; }
+}
+function applySnapshot(b64) {
+  try {
+    if (!state.ydoc || !b64) return false;
+    const u = b64UrlToBytes(b64);
+    if (!u || u.length < 2) return false;
+    // origin 'snapshot' (не 'remote') → локальный update-хендлер рассылит его
+    // уже подключённым пирам, а observe(onStrokesChange) перерисует холст.
+    Y.applyUpdate(state.ydoc, u, 'snapshot');
+    return true;
+  } catch (e) { console.warn('applySnapshot', e); return false; }
+}
+function readSnapshotFromHash() {
+  const m = location.hash.match(/[?&]d=([^&]+)/) || location.hash.match(/\bd=([^&]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+let _persistTimer = null;
+function schedulePersistHash() {
+  if (_persistTimer) clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(updateHashWithSnapshot, 1200);
+}
+function updateHashWithSnapshot() {
+  if (!state.ydoc || state.destroyed || !state.roomCode) return;
+  const strokes = state.yStrokes ? state.yStrokes.length : 0;
+  let hash = 'room=' + encodeURIComponent(state.roomCode);
+  if (strokes > 0) {
+    const snap = encodeSnapshot();
+    if (snap) hash += '&d=' + snap;
+  }
+  const cur = location.hash.startsWith('#') ? location.hash.slice(1) : location.hash;
+  if (cur !== hash) {
+    history.replaceState(null, '', '#' + hash);
+  }
 }
 
 // ============ Вход в комнату ============
@@ -287,6 +367,14 @@ async function enterRoom(code) {
   $('#room-code-display').textContent = code;
 
   initCanvas();
+  // Восстановить рисунок из ссылки (snapshot в hash) — чтобы тот, кто открыл
+  // ссылку позже/офлайн, сразу увидел «заметку». Применяем после initCanvas,
+  // чтобы observe(onStrokesChange) перерисовал холст.
+  const _snap = readSnapshotFromHash();
+  if (_snap) {
+    const applied = applySnapshot(_snap);
+    if (applied) showToast('Загружен рисунок из ссылки', 'success', 1800);
+  }
   buildSwatches();
   setupToolbar();
   setupTopbar();
@@ -295,6 +383,8 @@ async function enterRoom(code) {
   updateParticipants();   // показать свой аватар сразу
   pushAwareness();
   refreshHostUI();
+  updateHashWithSnapshot();   // зафиксировать base-hash (room=…, без d если пусто)
+  updateEmptyHint();          // подсказка на пустом холсте
 
   // Debug-бар: видимая диагностика P2P/sync на устройстве
   document.getElementById('debug-bar').classList.add('show');
@@ -461,7 +551,8 @@ function updateModeUI() {
   const txt = $('#turn-text');
   ind.classList.remove('waiting', 'you');
   if (mode === 'simultaneous') {
-    txt.textContent = 'Рисуем одновременно';
+    const online = 1 + state.peers; // вы + пиры
+    txt.textContent = 'Рисуем вместе · ' + online + ' онлайн';
     ind.classList.add('you');
     $('#lock-overlay').classList.remove('show');
   } else {
@@ -571,11 +662,19 @@ function updateConnStatus() {
   el.classList.remove('connecting', 'online', 'error');
   if (state.peers === 0) {
     el.classList.add('connecting');
-    txt.textContent = 'Ждём второго игрока…';
+    txt.textContent = 'Один в комнате · рисуйте и отправьте ссылку';
   } else {
     el.classList.add('online');
     txt.textContent = state.peers + (state.peers === 1 ? ' игрок рядом' : ' игрока рядом');
   }
+}
+
+// Подсказка на пустом холсте: что делать дальше (особенно когда один).
+function updateEmptyHint() {
+  const el = document.getElementById('empty-hint');
+  if (!el) return;
+  const n = state.yStrokes ? state.yStrokes.length : 0;
+  el.classList.toggle('show', n === 0);
 }
 
 // ============ Холст ============
@@ -739,7 +838,7 @@ function spawnTextInput(x, y) {
 }
 
 // ============ Отрисовка ============
-function onStrokesChange() { redrawMain(); }
+function onStrokesChange() { redrawMain(); schedulePersistHash(); updateEmptyHint(); }
 
 function redrawMain() {
   if (state.destroyed) return;
