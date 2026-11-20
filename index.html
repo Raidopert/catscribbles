@@ -218,26 +218,37 @@
 
   /* Тулбар */
   .toolbar{
-    flex-shrink:0;background:var(--bg-1);border-top:1px solid var(--border);
+    position:relative;flex-shrink:0;background:var(--bg-1);border-top:1px solid var(--border);
     padding:8px 10px;padding-bottom:calc(8px + var(--safe-bottom));
     padding-left:calc(10px + var(--safe-left));padding-right:calc(10px + var(--safe-right));
-    display:flex;align-items:center;gap:6px;overflow-x:auto;scrollbar-width:none;z-index:10
+    display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;
+    overflow:visible;z-index:10
   }
-  .toolbar::-webkit-scrollbar{display:none}
   .tool-group{display:flex;align-items:center;gap:4px;background:var(--bg-2);border:1px solid var(--border-soft);
     border-radius:10px;padding:4px;flex-shrink:0}
   .tool-btn{
-    width:38px;height:38px;border-radius:8px;background:transparent;border:0;color:var(--text-mute);
+    width:40px;height:40px;border-radius:8px;background:transparent;border:0;color:var(--text-mute);
     cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;padding:0;flex-shrink:0
   }
   .tool-btn:hover{color:var(--text);background:var(--bg-3)}
   .tool-btn.active{background:linear-gradient(135deg,var(--cyan),var(--magenta));color:#0a0d12;
     box-shadow:var(--glow-cyan)}
-  .tool-btn svg{width:18px;height:18px}
+  .tool-btn svg{width:20px;height:20px}
   .tool-btn[disabled]{opacity:.35;cursor:not-allowed}
 
-  .color-swatches{display:flex;gap:6px;align-items:center;padding:0 4px;flex-shrink:0}
-  .swatch{width:24px;height:24px;border-radius:50%;cursor:pointer;border:2px solid var(--bg-1);
+  /* «⋯ Ещё» — поповер с редкими действиями (undo/redo/download/clear/слой) */
+  .more-menu{
+    position:absolute;bottom:calc(100% + 6px);right:10px;
+    display:none;flex-direction:column;gap:6px;align-items:stretch;
+    background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:8px;
+    box-shadow:var(--shadow);z-index:25;min-width:120px
+  }
+  .more-menu.show{display:flex}
+  .more-menu .tool-group{background:var(--bg-3)}
+  .more-menu .layer-select{width:100%}
+
+  .color-swatches{display:flex;gap:5px;align-items:center;padding:0 4px;flex-shrink:0;flex-wrap:wrap;max-width:240px;justify-content:center}
+  .swatch{width:28px;height:28px;border-radius:50%;cursor:pointer;border:2px solid var(--bg-1);
     box-shadow:0 0 0 1px var(--border-soft);transition:.15s;padding:0;flex-shrink:0}
   .swatch:hover{transform:scale(1.1)}
   .swatch.active{box-shadow:0 0 0 2px var(--text),0 0 10px currentColor}
@@ -250,7 +261,7 @@
 
   .size-control{display:flex;align-items:center;gap:8px;padding:0 8px;flex-shrink:0}
   .size-control input[type=range]{
-    width:90px;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;
+    width:76px;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;
     background:var(--bg-3);outline:none
   }
   .size-control input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
@@ -299,6 +310,22 @@
   .empty-hint .t2{font-size:.88rem;line-height:1.5}
   .empty-hint .t2 b{color:var(--cyan)}
 
+  /* Онбординг (разовая карточка) */
+  #onboard{
+    position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+    width:min(92vw,380px);background:var(--bg-1);border:1px solid var(--border);
+    border-radius:18px;padding:clamp(18px,4vw,24px);box-shadow:var(--shadow);z-index:300;
+    text-align:center;color:var(--text);animation:ob-in .25s ease
+  }
+  @keyframes ob-in{from{opacity:0;transform:translate(-50%,-46%) scale(.96)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+  #onboard .ob-emoji{font-size:2.6rem;margin-bottom:6px;filter:drop-shadow(0 0 10px rgba(0,229,255,.4))}
+  #onboard .ob-title{font-size:1.1rem;font-weight:700;margin-bottom:14px;color:var(--cyan)}
+  #onboard .ob-steps{text-align:left;margin:0 auto 18px;padding-left:18px;max-width:300px;
+    font-size:.92rem;line-height:1.5;color:var(--text-mute)}
+  #onboard .ob-steps li{margin-bottom:8px}
+  #onboard .ob-steps b{color:var(--text)}
+  #onboard .ob-ok{width:100%;padding:12px;border:0;border-radius:10px;font-size:1rem;font-weight:700;cursor:pointer}
+
   /* Десктоп */
   @media (min-width:1024px){
     .toolbar{flex-direction:column;align-items:stretch;gap:8px;padding:10px;width:64px;
@@ -309,6 +336,10 @@
     .size-control input[type=range]{width:4px;height:80px;writing-mode:bt-lr;
       -webkit-appearance:slider-vertical;appearance:slider-vertical}
     .layer-select{font-size:.7rem;padding:6px 4px;text-align:center}
+    /* На десктопе «⋯ Ещё» не нужен — меню всегда развёрнуто в сайдбаре */
+    .more-menu{position:static;display:flex;background:transparent;border:0;padding:0;box-shadow:none;min-width:0}
+    .more-menu .tool-group{background:var(--bg-2)}
+    #btn-more{display:none}
     .stage{margin-left:0}
     #room{flex-direction:row}
     .topbar{flex-direction:column;width:64px;height:100%;border-bottom:0;border-right:1px solid var(--border);
@@ -433,6 +464,9 @@
     <button class="icon-btn" id="btn-share" title="Поделиться">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>
     </button>
+    <button class="icon-btn" id="btn-save" title="Сохранить заметку">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+    </button>
     <button class="icon-btn" id="btn-mode" title="Режим: одновременно / по очереди" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
     </button>
@@ -484,29 +518,35 @@
       <input type="range" id="size-range" min="1" max="48" value="4">
     </div>
 
-    <div class="tool-group">
-      <button class="tool-btn" id="btn-undo" title="Отменить" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
-      </button>
-      <button class="tool-btn" id="btn-redo" title="Повторить" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
-      </button>
-    </div>
+    <button class="tool-btn" id="btn-more" title="Ещё (отменить / повторить / скачать / слой)">
+      <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
+    </button>
 
-    <div class="tool-group">
-      <button class="tool-btn" id="btn-download" title="Скачать PNG">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-      </button>
-      <button class="tool-btn" id="btn-clear" title="Очистить холст (хост)" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-      </button>
-    </div>
+    <div class="more-menu" id="more-menu">
+      <div class="tool-group">
+        <button class="tool-btn" id="btn-undo" title="Отменить" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+        </button>
+        <button class="tool-btn" id="btn-redo" title="Повторить" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+        </button>
+      </div>
 
-    <select class="layer-select" id="layer-select" title="Слой">
-      <option value="0">Слой 1</option>
-      <option value="1">Слой 2</option>
-      <option value="2">Слой 3</option>
-    </select>
+      <div class="tool-group">
+        <button class="tool-btn" id="btn-download" title="Скачать PNG">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        </button>
+        <button class="tool-btn" id="btn-clear" title="Очистить холст (хост)" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
+      </div>
+
+      <select class="layer-select" id="layer-select" title="Слой">
+        <option value="0">Слой 1</option>
+        <option value="1">Слой 2</option>
+        <option value="2">Слой 3</option>
+      </select>
+    </div>
   </div>
 </section>
 
@@ -546,6 +586,6 @@
   }, 10000);
 })();
 </script>
-<script type="module" src="./app.js?v=9"></script>
+<script type="module" src="./app.js?v=10"></script>
 </body>
 </html>
