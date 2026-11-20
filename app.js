@@ -24,6 +24,11 @@ const RTC_CONFIG = {
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
+    // Бесплатный публичный TURN (OpenRelay by Metered) — критично для мобильных
+    // за симметричным NAT: STUN--only не пробивает, data-channel не открывается.
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
   ],
 };
 
@@ -106,6 +111,9 @@ const state = {
   _awareThrottle: null,
   destroyed: false,
 };
+
+// DEBUG: экспонируем состояние для диагностики из консоли (временно)
+window.__cs = state;
 
 // ============ DOM ============
 const landing = $('#landing');
@@ -285,6 +293,10 @@ async function enterRoom(code) {
   pushAwareness();
   refreshHostUI();
 
+  // Debug-бар: видимая диагностика P2P/sync на устройстве
+  document.getElementById('debug-bar').classList.add('show');
+  startDebugBar();
+
   // Если создатель — сразу показать шеринг-модалку
   if (state.isHost) {
     setTimeout(openShareModal, 400);
@@ -308,28 +320,46 @@ function setupYjsSync(ydoc, room) {
   const [sendStep2, onStep2] = room.makeAction('yjs-step2');
   const [sendUpdate, onUpdate] = room.makeAction('yjs-update');
 
+  // Счётчики для диагностики (видны в debug-баре через window.__cs.syncStats)
+  const stats = { step1Sent: 0, step1Recv: 0, step2Sent: 0, step2Recv: 0, updateSent: 0, updateRecv: 0, applyOk: 0, applyFail: 0, lastErr: '' };
+  state.syncStats = stats;
+
+  // Защитное приведение к Uint8Array: Trystero и так доставляет Uint8Array для
+  // бинарных makeAction, но на всякий случай (ArrayBuffer / view со сдвигом).
+  const toU8 = (d) => {
+    if (d instanceof Uint8Array) return d;
+    if (d instanceof ArrayBuffer) return new Uint8Array(d);
+    if (d && d.buffer instanceof ArrayBuffer) return new Uint8Array(d.buffer, d.byteOffset || 0, d.byteLength);
+    return new Uint8Array(d);
+  };
+
   // Получили state vector от пира — отвечаем diff'ом нашего состояния
   onStep1((vector, peerId) => {
+    stats.step1Recv++;
     try {
-      const update = Y.encodeStateAsUpdate(ydoc, vector);
-      if (update.byteLength > 2) sendStep2(update, peerId);
-    } catch (e) { console.warn('step2 send failed', e); }
+      const update = Y.encodeStateAsUpdate(ydoc, toU8(vector));
+      if (update.byteLength > 2) { sendStep2(update, peerId); stats.step2Sent++; }
+    } catch (e) { stats.lastErr = 'step1:' + e.message; console.warn('step2 send failed', e); }
   });
 
   // Получили state update — применяем
   onStep2((update, peerId) => {
-    try { Y.applyUpdate(ydoc, update, 'remote'); } catch (e) { console.warn('step2 apply failed', e); }
+    stats.step2Recv++;
+    try { Y.applyUpdate(ydoc, toU8(update), 'remote'); stats.applyOk++; }
+    catch (e) { stats.applyFail++; stats.lastErr = 'step2:' + e.message; console.warn('step2 apply failed', e); }
   });
 
   // Локальное изменение — рассылаем инкрементальный update всем
   ydoc.on('update', (update, origin) => {
     if (origin === 'remote') return;
-    try { sendUpdate(update, null); } catch (e) { /* peer might be gone */ }
+    try { sendUpdate(toU8(update), null); stats.updateSent++; } catch (e) { /* peer might be gone */ }
   });
 
   // Получили инкрементальный update — применяем
   onUpdate((update, peerId) => {
-    try { Y.applyUpdate(ydoc, update, 'remote'); } catch (e) { console.warn('update apply failed', e); }
+    stats.updateRecv++;
+    try { Y.applyUpdate(ydoc, toU8(update), 'remote'); stats.applyOk++; }
+    catch (e) { stats.applyFail++; stats.lastErr = 'update:' + e.message; console.warn('update apply failed', e); }
   });
 
   return {
@@ -337,7 +367,8 @@ function setupYjsSync(ydoc, room) {
       try {
         const vector = Y.encodeStateVector(ydoc);
         sendStep1(vector, peerId);
-      } catch (e) { console.warn('step1 send failed', e); }
+        stats.step1Sent++;
+      } catch (e) { stats.lastErr = 'sendStep1:' + e.message; console.warn('step1 send failed', e); }
     },
   };
 }
@@ -908,6 +939,41 @@ function downloadPNG() {
   link.href = out.toDataURL('image/png');
   link.click();
   showToast('Скачано', 'success', 1200);
+}
+
+// ============ Debug-бар: диагностика P2P и Yjs sync ============
+function startDebugBar() {
+  if (state._dbgTimer) clearInterval(state._dbgTimer);
+  updateDebugBar();
+  state._dbgTimer = setInterval(updateDebugBar, 800);
+}
+function updateDebugBar() {
+  const bar = document.getElementById('debug-bar');
+  if (!bar || state.destroyed) return;
+  // ICE-состояния пиров: показывают, реально ли открылся data-channel
+  const iceStates = [];
+  let dcOpen = 0;
+  try {
+    const peers = state.room && state.room.getPeers ? state.room.getPeers() : null;
+    if (peers) {
+      // Trystero getPeers() возвращает обычный объект {peerId: RTCPeerConnection}
+      const entries = (peers instanceof Map) ? [...peers] : Object.entries(peers);
+      for (const [, pc] of entries) {
+        const cs = (pc && (pc.connectionState || pc.iceConnectionState)) || '?';
+        iceStates.push(cs);
+        if (cs === 'connected' || cs === 'completed') dcOpen++;
+      }
+    }
+  } catch (e) {}
+  const s = state.syncStats || {};
+  const aware = state.peerAwareness ? state.peerAwareness.size : 0;
+  const strokes = state.yStrokes ? state.yStrokes.length : 0;
+  const failTag = s.applyFail > 0 || s.lastErr ? ` <i>FAIL:${s.applyFail}${s.lastErr ? ' ' + s.lastErr : ''}</i>` : '';
+  bar.innerHTML =
+    `<b>P2P</b> peers:${state.peers} dc:<b>${dcOpen}/${state.peers}</b> ice:[${iceStates.join(',')}] ` +
+    `<b>aware</b>:${aware} <b>strokes</b>:${strokes} ` +
+    `<b>sync</b> s1 ${s.step1Sent}/${s.step1Recv} s2 ${s.step2Sent}/${s.step2Recv} up ${s.updateSent}/${s.updateRecv} ok:${s.applyOk}` +
+    failTag;
 }
 
 // ============ Старт ============
