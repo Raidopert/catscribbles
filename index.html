@@ -176,6 +176,7 @@
   /* Зона холста */
   .stage{
     flex:1;position:relative;overflow:hidden;
+    touch-action:none; /* iOS: запретить жесты/скролл, иначе pointerup рвётся */
     background:
       linear-gradient(var(--border-soft) 1px,transparent 1px) 0 0/24px 24px,
       linear-gradient(90deg,var(--border-soft) 1px,transparent 1px) 0 0/24px 24px,
@@ -323,6 +324,11 @@
   /* Boot: модули ещё грузятся */
   .btn.booting{opacity:.55;cursor:wait;animation:cs-boot-pulse 1.2s ease-in-out infinite}
   @keyframes cs-boot-pulse{0%,100%{opacity:.55}50%{opacity:.3}}
+  /* Debug-бар: диагностика P2P/sync на устройстве */
+  #debug-bar{position:fixed;left:6px;bottom:6px;z-index:60;max-width:96vw;background:rgba(8,10,14,.94);color:#5fffd4;font:600 11px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;padding:5px 7px;border-radius:6px;border:1px solid rgba(0,255,200,.28);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:none}
+  #debug-bar.show{display:block}
+  #debug-bar b{color:#ffd25f}
+  #debug-bar i{color:#ff6b6b;font-style:normal}
 </style>
 </head>
 <body>
@@ -488,6 +494,7 @@
 </section>
 
 <div id="toast"></div>
+<div id="debug-bar"></div>
 
 <script>
 // Boot guard: работает даже если app.js (ES-модуль) не загрузился.
@@ -522,6 +529,6 @@
   }, 10000);
 })();
 </script>
-<script type="module" src="./app.js?v=2"></script>
+<script type="module" src="./app.js?v=5"></script>
 </body>
 </html>
