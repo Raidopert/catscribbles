@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0a0d12">
+<meta name="description" content="Совместная доска для рисования в реальном времени. Нарисуй заметку и отправь ссылку — друг откроет её позже и увидит.">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="./icon-512.png">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CatScribbles">
 <title>CatScribbles — КошачьиЗакорючки · совместная доска для рисования | raidopert.ru</title>
 <style>
   /* ============ Тема ============ */
@@ -109,6 +117,19 @@
   .features div{background:var(--bg-2);border:1px solid var(--border-soft);border-radius:10px;
     padding:10px 12px;font-size:.82rem;color:var(--text-mute);display:flex;align-items:center;gap:8px}
   .features div svg{width:16px;height:16px;color:var(--cyan);flex-shrink:0}
+
+  /* Недавние заметки (локальный список) */
+  .recent-rooms{margin-top:16px;text-align:left}
+  .recent-title{font-size:.78rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;
+    margin-bottom:8px;text-align:center}
+  .recent-list{display:flex;flex-direction:column;gap:6px}
+  .recent-item{display:flex;align-items:center;gap:10px;background:var(--bg-2);border:1px solid var(--border-soft);
+    border-radius:10px;padding:8px 12px;cursor:pointer;transition:.15s}
+  .recent-item:hover{border-color:var(--cyan);background:var(--bg-3)}
+  .recent-item .ri-code{font-family:ui-monospace,Menlo,monospace;font-weight:700;color:var(--cyan);font-size:.9rem}
+  .recent-item .ri-when{margin-left:auto;font-size:.72rem;color:var(--text-dim)}
+  .recent-item .ri-arrow{color:var(--text-dim)}
+  .recent-item:hover .ri-arrow{color:var(--cyan)}
 
   /* ============ Модалка шеринг ============ */
   .modal-backdrop{
@@ -433,6 +454,11 @@
     </div>
 
     <p class="hint">Живой режим — через <b>P2P WebRTC</b> напрямую между устройствами, сигналинг и хранение — на <b>Supabase</b>. <b>Рисунок не теряется</b>, когда вы закрываете приложение: один нарисовал заметку, второй открыл ту же ссылку позже — и увидел её. Без регистрации.</p>
+
+    <div class="recent-rooms" id="recent-rooms" hidden>
+      <div class="recent-title">Недавние заметки</div>
+      <div class="recent-list" id="recent-list"></div>
+    </div>
   </div>
 </section>
 
@@ -541,6 +567,9 @@
         <button class="tool-btn" id="btn-download" title="Скачать PNG">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
         </button>
+        <button class="tool-btn" id="btn-svg" title="Скачать SVG (вектор)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M7 16c3 0 3-8 6-8s3 8 6 8"/></svg>
+        </button>
         <button class="tool-btn" id="btn-clear" title="Очистить холст (хост)" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
         </button>
@@ -591,6 +620,14 @@
   }, 10000);
 })();
 </script>
-<script type="module" src="./app.js?v=11"></script>
+<script>
+// PWA: регистрация service worker (офлайн-оболочка + установка на главный экран)
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+</script>
+<script type="module" src="./app.js?v=12"></script>
 </body>
 </html>
