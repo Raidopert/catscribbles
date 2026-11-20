@@ -9,10 +9,10 @@
 // ====================================================================
 
 import * as Y from 'https://esm.sh/yjs@13.6.21';
-// Сигналинг: nostr (публичные Nostr-реляции) вместо torrent — WebTorrent-трекеры
-// не пробивались у ряда пользователей (peers:0 на обоих устройствах). Nostr-реляции
-// глобально доступны и работают в Safari iOS. TURN оставлен для мобильного NAT.
-import { joinRoom, selfId, getRelaySockets } from 'https://esm.sh/trystero@0.20.0/nostr';
+// Сигналинг: supabase (Realtime-каналы) — надёжно, глобально, работает в Safari iOS.
+// Решает peers:0 (публичные трекеры/nostr-реляции были нестабильны у части юзеров).
+// Trystero supabase: createClient(appId=URL, supabaseKey). rtcConfig с TURN для NAT.
+import { joinRoom, selfId } from 'https://esm.sh/trystero@0.20.0/supabase';
 import QRCode from 'https://esm.sh/qrcode@1.5.4';
 
 // ============ Константы ============
@@ -21,6 +21,13 @@ const MAX_PARTICIPANTS = 8;
 const PALETTE = ['#00e5ff', '#ff2bd6', '#00ff88', '#ffb800', '#a78bff', '#ff5470', '#ff8a3d', '#ffffff'];
 const USER_COLORS = ['#00e5ff', '#ff2bd6', '#00ff88', '#ffb800', '#a78bff', '#ff5470', '#00d4ff', '#ff8a3d'];
 const ROOM_PREFIX = 'CS-';
+// Supabase: Realtime (сигналинг) + таблица catscribbles_rooms (авто-persistence).
+// Publishable-ключ безопасен для клиентского кода (как Firebase web-config);
+// RLS таблицы разрешает anon только читать/писать строки комнат.
+const SB_URL = 'https://gpwsnefhaiawoigqdnnr.supabase.co';
+const SB_KEY = 'sb_publishable_edH7sk8jpGTBLDG9F4G8mA_2HCDsOR-';
+const SB_TABLE = 'catscribbles_rooms';
+const SB_REST = SB_URL + '/rest/v1/' + SB_TABLE;
 const RTC_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -278,16 +285,67 @@ function readSnapshotFromHash() {
   const m = location.hash.match(/[?&]d=([^&]+)/) || location.hash.match(/\bd=([^&]+)/);
   return m ? decodeURIComponent(m[1]) : '';
 }
+// ============ Supabase persistence (авто-сохранение рисунка в БД) ============
+// publishable-ключ = роль anon; RLS таблицы разрешает читать/писать строки комнат.
+// Если таблицы/RLS нет — save/load тихо падает, фолбэком остаётся URL-hash (d=).
+state.persistStats = { load: 'pending', save: 'pending', lastErr: '' };
+const SB_HDR = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+
+async function sbLoadState(roomId) {
+  try {
+    const r = await fetch(`${SB_REST}?room_id=eq.${encodeURIComponent(roomId)}&select=state&limit=1`, { headers: SB_HDR });
+    if (!r.ok) { state.persistStats.lastErr = 'load ' + r.status; return null; }
+    const arr = await r.json();
+    state.persistStats.load = arr && arr[0] && arr[0].state ? 'ok' : 'empty';
+    return (arr && arr[0] && arr[0].state) ? arr[0].state : null;
+  } catch (e) { state.persistStats.lastErr = 'load ' + e.message; return null; }
+}
+async function sbSaveState(roomId, b64, { keepalive = false } = {}) {
+  try {
+    const r = await fetch(SB_REST + '?on_conflict=room_id', {
+      method: 'POST',
+      headers: { ...SB_HDR, Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ room_id: roomId, state: b64, updated_at: new Date().toISOString() }),
+      keepalive,
+    });
+    state.persistStats.save = r.ok ? 'ok' : 'err' + r.status;
+    if (!r.ok) state.persistStats.lastErr = 'save ' + r.status;
+    return r.ok;
+  } catch (e) { state.persistStats.save = 'err'; state.persistStats.lastErr = 'save ' + e.message; return false; }
+}
+
 let _persistTimer = null;
-function schedulePersistHash() {
+function schedulePersist() {
   if (_persistTimer) clearTimeout(_persistTimer);
-  _persistTimer = setTimeout(updateHashWithSnapshot, 1200);
+  _persistTimer = setTimeout(persistNow, 1500);
+}
+function persistNow() {
+  if (!state.ydoc || state.destroyed || !state.roomId) return;
+  updateHashWithSnapshot();                 // 1) URL-hash (фолбэк + share-link несёт рисунок)
+  const strokes = state.yStrokes ? state.yStrokes.length : 0;
+  if (strokes > 0) {                        // 2) Supabase-таблица (авто-persistence)
+    const snap = encodeSnapshot();
+    if (snap) sbSaveState(state.roomId, snap);
+  }
+}
+// Флаш при закрытии вкладки: keepalive-запрос переживает unload — заметка сохранится.
+function flushPersistOnExit() {
+  if (!state.ydoc || state.destroyed || !state.roomId) return;
+  const strokes = state.yStrokes ? state.yStrokes.length : 0;
+  if (strokes > 0) {
+    const snap = encodeSnapshot();
+    if (snap) sbSaveState(state.roomId, snap, { keepalive: true });
+  }
 }
 function updateHashWithSnapshot() {
   if (!state.ydoc || state.destroyed || !state.roomCode) return;
   const strokes = state.yStrokes ? state.yStrokes.length : 0;
   let hash = 'room=' + encodeURIComponent(state.roomCode);
-  if (strokes > 0) {
+  // d= (рисунок в ссылке) — только как ФОЛБЭК, когда Supabase не сохраняет.
+  // Если БД жива (save=ok) — ссылка остаётся короткой (#room=CS-XXXXXX), а рисунок
+  // подгружается с сервера при открытии. Так QR/ссылка не разбухают.
+  const dbOk = state.persistStats && state.persistStats.save === 'ok';
+  if (strokes > 0 && !dbOk) {
     const snap = encodeSnapshot();
     if (snap) hash += '&d=' + snap;
   }
@@ -308,10 +366,11 @@ async function enterRoom(code) {
   state.yStrokes = ydoc.getArray('strokes');
   state.yMeta = ydoc.getMap('meta');
 
-  // 2) Trystero-комната (torrent-стратегия, публичные трекеры, STUN Google/Twilio)
+  // 2) Trystero-комната (supabase-стратегия: Realtime-каналы + STUN/TURN).
+  //    appId здесь = URL Supabase (особенность стратегии), supabaseKey = publishable.
   let room;
   try {
-    room = joinRoom({ appId: APP_ID, rtcConfig: RTC_CONFIG }, state.roomId);
+    room = joinRoom({ appId: SB_URL, supabaseKey: SB_KEY, rtcConfig: RTC_CONFIG }, state.roomId);
     state.room = room;
   } catch (e) {
     console.error('Trystero init failed', e);
@@ -367,14 +426,22 @@ async function enterRoom(code) {
   $('#room-code-display').textContent = code;
 
   initCanvas();
-  // Восстановить рисунок из ссылки (snapshot в hash) — чтобы тот, кто открыл
-  // ссылку позже/офлайн, сразу увидел «заметку». Применяем после initCanvas,
-  // чтобы observe(onStrokesChange) перерисовал холст.
+  // Восстановить рисунок. Сначала из URL-hash (мгновенно, локально) — чтобы тот,
+  // кто открыл ссылку позже, сразу увидел «заметку». Затем асинхронно из Supabase
+  // (актуальнее — может быть новее, если кто-то дорисовал после создания ссылки).
+  // Yjs-merge по client/clock: повторное применение не дублирует штрихи.
   const _snap = readSnapshotFromHash();
-  if (_snap) {
-    const applied = applySnapshot(_snap);
-    if (applied) showToast('Загружен рисунок из ссылки', 'success', 1800);
-  }
+  if (_snap) applySnapshot(_snap);
+  // Авто-persistence: загрузить последнее сохранённое состояние комнаты из БД.
+  (async () => {
+    const dbState = await sbLoadState(state.roomId);
+    if (dbState) {
+      applySnapshot(dbState);
+      updateEmptyHint();
+    }
+  })();
+  // Флаш при закрытии вкладки — чтобы «заметка» точно сохранилась.
+  window.addEventListener('beforeunload', flushPersistOnExit, { once: false });
   buildSwatches();
   setupToolbar();
   setupTopbar();
@@ -620,6 +687,11 @@ function leaveRoom() {
 
 function destroyRoom() {
   state.destroyed = true;
+  try { window.removeEventListener('beforeunload', flushPersistOnExit); } catch(e){}
+  try { if (state.ydoc && state.yStrokes && state.yStrokes.length > 0) {
+    const snap = encodeSnapshot();
+    if (snap) sbSaveState(state.roomId, snap, { keepalive: true }); // флаш заметки при выходе
+  }} catch(e){}
   try { state.yStrokes && state.yStrokes.unobserve(onStrokesChange); } catch(e){}
   try { state.yMeta && state.yMeta.unobserve(onMetaChange); } catch(e){}
   try { state.room && state.room.leave(); } catch(e){}
@@ -838,7 +910,7 @@ function spawnTextInput(x, y) {
 }
 
 // ============ Отрисовка ============
-function onStrokesChange() { redrawMain(); schedulePersistHash(); updateEmptyHint(); }
+function onStrokesChange() { redrawMain(); schedulePersist(); updateEmptyHint(); }
 
 function redrawMain() {
   if (state.destroyed) return;
@@ -1067,23 +1139,16 @@ function updateDebugBar() {
       }
     }
   } catch (e) {}
-  // Nostr-реляции: сколько WebSocket-ов открыто (диагностика сигналинга)
-  let relaysOpen = 0, relaysTotal = 0;
-  try {
-    const socks = (typeof getRelaySockets === 'function') ? getRelaySockets() : null;
-    if (socks) {
-      const vals = Object.values(socks);
-      relaysTotal = vals.length;
-      relaysOpen = vals.filter(ws => ws && ws.readyState === 1).length;
-    }
-  } catch (e) {}
+  // Persistence: состояние сохранения в Supabase (db:ok = сохранено, ff = фолбэк на hash)
+  const ps = state.persistStats || {};
+  const dbTag = ps.save === 'ok' ? 'ok' : (ps.save && ps.save.startsWith('err')) ? 'ff' : '–';
   const s = state.syncStats || {};
   const aware = state.peerAwareness ? state.peerAwareness.size : 0;
   const strokes = state.yStrokes ? state.yStrokes.length : 0;
   const failTag = s.applyFail > 0 || s.lastErr ? ` <i>FAIL:${s.applyFail}${s.lastErr ? ' ' + s.lastErr : ''}</i>` : '';
   bar.innerHTML =
     `<b>P2P</b> peers:${state.peers} dc:<b>${dcOpen}/${state.peers}</b> ice:[${iceStates.join(',')}] ` +
-    `<b>relays</b>:${relaysOpen}/${relaysTotal} ` +
+    `<b>db</b>:${dbTag} ` +
     `<b>aware</b>:${aware} <b>strokes</b>:${strokes} ` +
     `<b>sync</b> s1 ${s.step1Sent}/${s.step1Recv} s2 ${s.step2Sent}/${s.step2Recv} up ${s.updateSent}/${s.updateRecv} ok:${s.applyOk}` +
     failTag;
