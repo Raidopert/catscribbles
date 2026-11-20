@@ -187,6 +187,54 @@ $('#join-nick').addEventListener('keydown', e => { if (e.key === 'Enter') $('#bt
   }
 })();
 
+// ============ Недавние заметки (локальный список на лендинге) ============
+const RECENT_KEY = 'cs_recent_v1';
+function getRecentRooms() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY)) || []; } catch (e) { return []; }
+}
+function addRecentRoom(code, nick) {
+  if (!code) return;
+  try {
+    const list = getRecentRooms().filter(r => r.code !== code);
+    list.unshift({ code, nick: nick || '', ts: Date.now() });
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 8)));
+  } catch (e) {}
+}
+function fmtWhen(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return 'только что';
+  if (s < 3600) return Math.floor(s / 60) + ' мин назад';
+  if (s < 86400) return Math.floor(s / 3600) + ' ч назад';
+  return Math.floor(s / 86400) + ' д назад';
+}
+function renderRecentRooms() {
+  const wrap = $('#recent-rooms');
+  const list = $('#recent-list');
+  if (!wrap || !list) return;
+  const items = getRecentRooms();
+  if (items.length === 0) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  list.innerHTML = '';
+  for (const r of items) {
+    const el = document.createElement('div');
+    el.className = 'recent-item';
+    el.innerHTML =
+      '<span class="ri-code">' + r.code + '</span>' +
+      (r.nick ? '<span class="ri-nick" style="color:var(--text-mute);font-size:.8rem">' + r.nick + '</span>' : '') +
+      '<span class="ri-when">' + fmtWhen(r.ts) + '</span>' +
+      '<span class="ri-arrow">→</span>';
+    el.addEventListener('click', () => {
+      $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === 'join'));
+      $('#pane-create').hidden = true;
+      $('#pane-join').hidden = false;
+      $('#join-code').value = r.code;
+      $('#btn-join').click();
+    });
+    list.appendChild(el);
+  }
+}
+renderRecentRooms();
+
 // ============ Шеринг-модалка ============
 const shareModal = $('#share-modal');
 
@@ -492,6 +540,7 @@ async function enterRoom(code) {
   landing.style.display = 'none';
   roomEl.classList.add('active');
   $('#room-code-display').textContent = code;
+  addRecentRoom(code, state.nick);   // запомнить в локальном списке «Недавние»
 
   initCanvas();
   // Восстановить рисунок. Сначала из URL-hash (мгновенно, локально) — чтобы тот,
@@ -1144,6 +1193,7 @@ function setupToolbar() {
   $('#btn-redo').addEventListener('click', redo);
   $('#btn-clear').addEventListener('click', clearCanvas);
   $('#btn-download').addEventListener('click', downloadPNG);
+  $('#btn-svg').addEventListener('click', downloadSVG);
   // «⋯ Ещё» — поповер с редкими действиями (undo/redo/download/clear/слой)
   const moreMenu = $('#more-menu');
   const moreBtn = $('#btn-more');
@@ -1237,6 +1287,50 @@ function downloadPNG() {
   link.href = out.toDataURL('image/png');
   link.click();
   showToast('Скачано', 'success', 1200);
+}
+// Экспорт векторного SVG: pen-штрихи → <path> (квадратичные кривые), text → <text>.
+// Ластик пропускается (в векторе он не имеет смысла; для точного растра есть PNG).
+function strokeToPath(s) {
+  const p = s.points;
+  if (!p || p.length === 0) return '';
+  if (p.length === 1) return `M${p[0][0]} ${p[0][1]} l0.01 0`;
+  let d = `M${p[0][0]} ${p[0][1]}`;
+  for (let i = 1; i < p.length - 1; i++) {
+    const [x, y] = p[i], [nx, ny] = p[i + 1];
+    d += ` Q${x} ${y} ${(x + nx) / 2} ${(y + ny) / 2}`;
+  }
+  const last = p[p.length - 1];
+  d += ` L${last[0]} ${last[1]}`;
+  return d;
+}
+function downloadSVG() {
+  const W = mainCanvas.width, H = mainCanvas.height;
+  const arr = (state.yStrokes ? state.yStrokes.toArray() : []).slice();
+  arr.sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
+  let body = '';
+  for (const s of arr) {
+    if (s.tool === 'eraser') continue;
+    if (s.tool === 'text' && s.text) {
+      const fs = Math.max(14, Math.min(72, (s.size || 4) * 3));
+      body += `  <text x="${s.points[0][0]}" y="${s.points[0][1]}" font-family="Inter,system-ui,sans-serif" font-weight="600" font-size="${fs}" fill="${s.color}" dominant-baseline="middle">${s.text.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</text>\n`;
+    } else {
+      const d = strokeToPath(s);
+      if (!d) continue;
+      body += `  <path d="${d}" stroke="${s.color}" stroke-width="${s.size}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>\n`;
+    }
+  }
+  if (!body) { showToast('Пусто — нечего выгружать', '', 1600); return; }
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">\n` +
+    `  <rect width="${W}" height="${H}" fill="#11161f"/>\n` + body + `</svg>`;
+  const blob = new Blob([svg], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.download = `catscribbles-${state.roomCode}-${Date.now()}.svg`;
+  link.href = url;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('SVG скачан', 'success', 1400);
 }
 
 // ============ Debug-бар: диагностика P2P и Yjs sync ============
