@@ -290,7 +290,7 @@ function readSnapshotFromHash() {
 // ============ Supabase persistence (авто-сохранение рисунка в БД) ============
 // publishable-ключ = роль anon; RLS таблицы разрешает читать/писать строки комнат.
 // Если таблицы/RLS нет — save/load тихо падает, фолбэком остаётся URL-hash (d=).
-state.persistStats = { load: 'pending', save: 'pending', lastErr: '' };
+state.persistStats = { load: 'pending', save: 'pending', lastErr: '', dirty: false };
 const SB_HDR = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
 
 async function sbLoadState(roomId) {
@@ -311,13 +311,21 @@ async function sbSaveState(roomId, b64, { keepalive = false } = {}) {
       keepalive,
     });
     state.persistStats.save = r.ok ? 'ok' : 'err' + r.status;
-    if (!r.ok) state.persistStats.lastErr = 'save ' + r.status;
+    if (r.ok) state.persistStats.dirty = false;   // изменения сброшены в БД
+    else state.persistStats.lastErr = 'save ' + r.status;
     updateHashWithSnapshot();   // переоценить hash: убрать d= когда db:ok (ссылка станет короткой)
+    updateSaveIndicator();      // точка: зелёная (saved) / красная (err)
     return r.ok;
-  } catch (e) { state.persistStats.save = 'err'; state.persistStats.lastErr = 'save ' + e.message; return false; }
+  } catch (e) {
+    state.persistStats.save = 'err';
+    state.persistStats.lastErr = 'save ' + e.message;
+    updateSaveIndicator();
+    return false;
+  }
 }
 
 let _persistTimer = null;
+let _reconnectTimer = null;   // grace-таймер «Переподключение…» (12с) при потере пиров
 function schedulePersist() {
   if (_persistTimer) clearTimeout(_persistTimer);
   _persistTimer = setTimeout(persistNow, 1500);
@@ -338,6 +346,31 @@ function flushPersistOnExit() {
   if (strokes > 0) {
     const snap = encodeSnapshot();
     if (snap) sbSaveState(state.roomId, snap, { keepalive: true });
+  }
+}
+// Индикатор несохранённых изменений: точка на room-badge.
+//   зелёная — сохранено на сервере (db:ok, нет pending-изменений)
+//   янтарная (пульс) — изменения ждут сброса в БД (debounce 1.5с / идёт запрос)
+//   красная — последний save упал (данные всё равно в URL-ссылке — фолбэк)
+function markDirty() {
+  if (!state.persistStats) return;
+  state.persistStats.dirty = true;
+  updateSaveIndicator();
+}
+function updateSaveIndicator() {
+  const badge = $('#room-badge');
+  if (!badge) return;
+  const ps = state.persistStats || {};
+  badge.classList.remove('saving', 'err');
+  const saveErr = typeof ps.save === 'string' && ps.save.startsWith('err');
+  if (saveErr) {
+    badge.classList.add('err');
+    badge.title = 'Не сохранено на сервер — рисунок в ссылке (фолбэк). Нажмите «Сохранить».';
+  } else if (ps.dirty) {
+    badge.classList.add('saving');
+    badge.title = 'Сохранение…';
+  } else {
+    badge.title = 'Сохранено. Нажмите, чтобы поделиться.';
   }
 }
 // Явное сохранение заметки по кнопке в topbar. Даёт пользователю уверенность
@@ -419,6 +452,12 @@ async function enterRoom(code) {
   //    поэтому регистрируем ОДИН раз — объединяем счётчик, awareness и Yjs sync)
   room.onPeerJoin((peerId) => {
     state.peers++;
+    if (state.reconnecting) {            // обрыв → связь восстановлена
+      state.reconnecting = false;
+      if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+      showToast('Связь восстановлена', 'success', 1600);
+    }
+    state.hadPeers = true;
     updateConnStatus();
     pushAwareness();
     // Yjs sync: отправляем новому пиру свой state vector
@@ -429,7 +468,19 @@ async function enterRoom(code) {
     const leftUserId = state.peerUserId.get(peerId);
     state.peerAwareness.delete(peerId);
     state.peerUserId.delete(peerId);
-    updateConnStatus();
+    // Все пиры ушли, но раньше были → возможно обрыв связи (Trystero ретраит подписку).
+    if (state.peers === 0 && state.hadPeers && !state.reconnecting) {
+      state.reconnecting = true;
+      updateConnStatus();
+      if (_reconnectTimer) clearTimeout(_reconnectTimer);
+      _reconnectTimer = setTimeout(() => {
+        state.reconnecting = false;
+        _reconnectTimer = null;
+        updateConnStatus();
+      }, 12000);
+    } else {
+      updateConnStatus();
+    }
     updateParticipants();
     redrawOverlay();
     if (leftUserId && state.yMeta.get('hostId') === leftUserId) {
@@ -465,6 +516,7 @@ async function enterRoom(code) {
   updateModeUI();
   updateConnStatus();
   updateParticipants();   // показать свой аватар сразу
+  updateSaveIndicator();  // точка сохранения: стартовое состояние
   showOnboarding();       // разовый онбординг (один раз на браузер)
   pushAwareness();
   refreshHostUI();
@@ -731,6 +783,9 @@ function leaveRoom() {
 
 function destroyRoom() {
   state.destroyed = true;
+  try { if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } } catch(e){}
+  state.reconnecting = false;
+  state.hadPeers = false;
   try { window.removeEventListener('beforeunload', flushPersistOnExit); } catch(e){}
   try { if (state.ydoc && state.yStrokes && state.yStrokes.length > 0) {
     const snap = encodeSnapshot();
@@ -775,10 +830,19 @@ function updateParticipants() {
 function updateConnStatus() {
   const el = $('#conn-status');
   const txt = $('#conn-text');
-  el.classList.remove('connecting', 'online', 'error');
+  el.classList.remove('connecting', 'online', 'error', 'reconnecting');
   if (state.peers === 0) {
-    el.classList.add('connecting');
-    txt.textContent = 'Один в комнате · рисуйте и отправьте ссылку';
+    if (state.reconnecting) {
+      el.classList.add('reconnecting');
+      txt.textContent = 'Переподключение…';
+    } else if (state.hadPeers) {
+      // пиры были, но не вернулись за 12с — успокаиваем: данные сохранены
+      el.classList.add('connecting');
+      txt.textContent = 'Один в комнате · рисунок сохранён';
+    } else {
+      el.classList.add('connecting');
+      txt.textContent = 'Один в комнате · рисуйте и отправьте ссылку';
+    }
   } else {
     el.classList.add('online');
     txt.textContent = state.peers + (state.peers === 1 ? ' игрок рядом' : ' игрока рядом');
@@ -956,6 +1020,7 @@ function spawnTextInput(x, y) {
 // ============ Отрисовка ============
 function onStrokesChange() {
   redrawMain(); schedulePersist(); updateEmptyHint();
+  markDirty();   // индикатор: есть несохранённые изменения
   if (state._onboardDismiss) state._onboardDismiss(); // первый штрих → скрыть онбординг
 }
 
