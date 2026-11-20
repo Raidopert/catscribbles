@@ -340,6 +340,20 @@ function flushPersistOnExit() {
     if (snap) sbSaveState(state.roomId, snap, { keepalive: true });
   }
 }
+// Явное сохранение заметки по кнопке в topbar. Даёт пользователю уверенность
+// (toast), что рисунок сохранён на сервере (db:ok) либо в ссылке (фолбэк).
+async function saveNote() {
+  if (!state.ydoc || state.destroyed || !state.roomId) return;
+  const strokes = state.yStrokes ? state.yStrokes.length : 0;
+  if (strokes === 0) { showToast('Пусто — нечего сохранять', '', 1600); return; }
+  showToast('Сохраняю…', '', 1400);
+  updateHashWithSnapshot();
+  const snap = encodeSnapshot();
+  if (!snap) { showToast('Не удалось сохранить', 'error', 2000); return; }
+  const ok = await sbSaveState(state.roomId, snap);
+  if (ok) showToast('Заметка сохранена ✓', 'success', 1900);
+  else showToast('Сохранено в ссылке', '', 2000);
+}
 function updateHashWithSnapshot() {
   if (!state.ydoc || state.destroyed || !state.roomCode) return;
   const strokes = state.yStrokes ? state.yStrokes.length : 0;
@@ -451,13 +465,16 @@ async function enterRoom(code) {
   updateModeUI();
   updateConnStatus();
   updateParticipants();   // показать свой аватар сразу
+  showOnboarding();       // разовый онбординг (один раз на браузер)
   pushAwareness();
   refreshHostUI();
   updateHashWithSnapshot();   // зафиксировать base-hash (room=…, без d если пусто)
   updateEmptyHint();          // подсказка на пустом холсте
 
-  // Debug-бар: видимая диагностика P2P/sync на устройстве
-  document.getElementById('debug-bar').classList.add('show');
+  // Debug-бар: только по ?debug (по умолчанию скрыт для чистого вида)
+  if (new URLSearchParams(location.search).has('debug')) {
+    document.getElementById('debug-bar').classList.add('show');
+  }
   startDebugBar();
 
   // Если создатель — сразу показать шеринг-модалку
@@ -651,9 +668,33 @@ function findPeerById(id) {
 }
 
 // ============ Topbar ============
+// Онбординг: разовая карточка «как пользоваться» (один раз на браузер).
+function showOnboarding() {
+  try { if (localStorage.getItem('cs_onboarded_v1')) return; } catch(e){}
+  const card = document.createElement('div');
+  card.id = 'onboard';
+  card.innerHTML =
+    '<div class="ob-emoji">👋</div>' +
+    '<div class="ob-title">Как пользоваться</div>' +
+    '<ol class="ob-steps">' +
+    '<li><b>Рисуйте</b> на холсте пальцем или мышью.</li>' +
+    '<li>Нажмите <b>«Сохранить»</b> — заметка уйдёт на сервер (или сохранится сама).</li>' +
+    '<li>Отправьте <b>ссылку</b> другу: он откроет её позже и увидит вашу заметку.</li>' +
+    '</ol>' +
+    '<button class="btn btn-primary ob-ok">Понятно</button>';
+  document.body.appendChild(card);
+  const dismiss = () => {
+    try { localStorage.setItem('cs_onboarded_v1', '1'); } catch(e){}
+    if (card.parentNode) card.remove();
+    state._onboardDismiss = null;
+  };
+  state._onboardDismiss = dismiss;
+  card.querySelector('.ob-ok').addEventListener('click', dismiss);
+}
 function setupTopbar() {
   $('#room-badge').addEventListener('click', openShareModal);
   $('#btn-share').addEventListener('click', openShareModal);
+  $('#btn-save').addEventListener('click', saveNote);
   $('#btn-leave').addEventListener('click', leaveRoom);
   $('#btn-mode').addEventListener('click', toggleMode);
   $('#btn-next').addEventListener('click', passTurn);
@@ -913,7 +954,10 @@ function spawnTextInput(x, y) {
 }
 
 // ============ Отрисовка ============
-function onStrokesChange() { redrawMain(); schedulePersist(); updateEmptyHint(); }
+function onStrokesChange() {
+  redrawMain(); schedulePersist(); updateEmptyHint();
+  if (state._onboardDismiss) state._onboardDismiss(); // первый штрих → скрыть онбординг
+}
 
 function redrawMain() {
   if (state.destroyed) return;
@@ -1035,6 +1079,18 @@ function setupToolbar() {
   $('#btn-redo').addEventListener('click', redo);
   $('#btn-clear').addEventListener('click', clearCanvas);
   $('#btn-download').addEventListener('click', downloadPNG);
+  // «⋯ Ещё» — поповер с редкими действиями (undo/redo/download/clear/слой)
+  const moreMenu = $('#more-menu');
+  const moreBtn = $('#btn-more');
+  if (moreMenu && moreBtn) {
+    moreBtn.addEventListener('click', e => { e.stopPropagation(); moreMenu.classList.toggle('show'); });
+    document.addEventListener('pointerdown', e => {
+      if (!moreMenu.contains(e.target) && e.target !== moreBtn) moreMenu.classList.remove('show');
+    });
+    // Действия внутри меню закрывают его
+    moreMenu.querySelectorAll('button, select').forEach(el =>
+      el.addEventListener('pointerdown', () => { setTimeout(() => moreMenu.classList.remove('show'), 60); }));
+  }
 }
 
 function buildSwatches() {
