@@ -2,10 +2,11 @@
 // CatScribbles (КошачьиЗакорючки) — совместная доска для рисования в реальном времени
 // Архитектура:
 //   • Yjs (CRDT) — общее состояние (штрихи, мета, ходы)
-//   • Trystero 0.20.0 (torrent-стратегия, публичные WebTorrent-трекеры) — P2P-транспорт
+//   • Trystero 0.20.0 (supabase-стратегия: Realtime-каналы) — P2P-сигналинг
 //   • Ручная реализация Yjs sync-протокола через makeAction (step1/step2/update)
 //   • Awareness (курсоры, ник, цвет, live-штрих) через отдельный makeAction
-// Без сервера: данные идут напрямую между пирами по WebRTC.
+//   • Supabase-таблица catscribbles_rooms — авто-persistence (заметка переживает закрытие)
+// WebRTC-данные идут напрямую между пирами; сигналинг и хранение — на Supabase.
 // ====================================================================
 
 import * as Y from 'https://esm.sh/yjs@13.6.21';
@@ -246,7 +247,8 @@ function buildRoomLink() {
 // ============ Persistence: рисунок живёт в URL hash ============
 // В чистом P2P нет сервера, поэтому «заметка для того, кто откроет ссылку позже»
 // кодируется прямо в hash: #room=CS-XXXXXX&d=<base64url(Y.encodeStateAsUpdate)>.
-// Live-синхрон (nostr) работает поверх, когда оба онлайн; snapshot — асинхронный фолбэк.
+// Это ФОЛБЭК: когда Supabase-таблица жива (db:ok), рисунок хранится на сервере и
+// ссылка остаётся короткой. Live-синхрон (Realtime) работает поверх, когда оба онлайн.
 function bytesToB64Url(bytes) {
   let bin = '';
   const chunk = 0x8000;
@@ -310,6 +312,7 @@ async function sbSaveState(roomId, b64, { keepalive = false } = {}) {
     });
     state.persistStats.save = r.ok ? 'ok' : 'err' + r.status;
     if (!r.ok) state.persistStats.lastErr = 'save ' + r.status;
+    updateHashWithSnapshot();   // переоценить hash: убрать d= когда db:ok (ссылка станет короткой)
     return r.ok;
   } catch (e) { state.persistStats.save = 'err'; state.persistStats.lastErr = 'save ' + e.message; return false; }
 }
