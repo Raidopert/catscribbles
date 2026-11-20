@@ -9,7 +9,10 @@
 // ====================================================================
 
 import * as Y from 'https://esm.sh/yjs@13.6.21';
-import { joinRoom, selfId } from 'https://esm.sh/trystero@0.20.0/torrent';
+// Сигналинг: nostr (публичные Nostr-реляции) вместо torrent — WebTorrent-трекеры
+// не пробивались у ряда пользователей (peers:0 на обоих устройствах). Nostr-реляции
+// глобально доступны и работают в Safari iOS. TURN оставлен для мобильного NAT.
+import { joinRoom, selfId, getRelaySockets } from 'https://esm.sh/trystero@0.20.0/nostr';
 import QRCode from 'https://esm.sh/qrcode@1.5.4';
 
 // ============ Константы ============
@@ -965,12 +968,23 @@ function updateDebugBar() {
       }
     }
   } catch (e) {}
+  // Nostr-реляции: сколько WebSocket-ов открыто (диагностика сигналинга)
+  let relaysOpen = 0, relaysTotal = 0;
+  try {
+    const socks = (typeof getRelaySockets === 'function') ? getRelaySockets() : null;
+    if (socks) {
+      const vals = Object.values(socks);
+      relaysTotal = vals.length;
+      relaysOpen = vals.filter(ws => ws && ws.readyState === 1).length;
+    }
+  } catch (e) {}
   const s = state.syncStats || {};
   const aware = state.peerAwareness ? state.peerAwareness.size : 0;
   const strokes = state.yStrokes ? state.yStrokes.length : 0;
   const failTag = s.applyFail > 0 || s.lastErr ? ` <i>FAIL:${s.applyFail}${s.lastErr ? ' ' + s.lastErr : ''}</i>` : '';
   bar.innerHTML =
     `<b>P2P</b> peers:${state.peers} dc:<b>${dcOpen}/${state.peers}</b> ice:[${iceStates.join(',')}] ` +
+    `<b>relays</b>:${relaysOpen}/${relaysTotal} ` +
     `<b>aware</b>:${aware} <b>strokes</b>:${strokes} ` +
     `<b>sync</b> s1 ${s.step1Sent}/${s.step1Recv} s2 ${s.step2Sent}/${s.step2Recv} up ${s.updateSent}/${s.updateRecv} ok:${s.applyOk}` +
     failTag;
