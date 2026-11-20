@@ -153,7 +153,10 @@
   }
   .topbar .room-badge:hover{border-color:var(--cyan)}
   .topbar .room-badge .dot-live{width:7px;height:7px;border-radius:50%;background:var(--green);
-    box-shadow:0 0 6px var(--green)}
+    box-shadow:0 0 6px var(--green);transition:.2s}
+  .topbar .room-badge.saving .dot-live{background:var(--amber);box-shadow:0 0 6px var(--amber);animation:dot-pulse 1s infinite}
+  .topbar .room-badge.err .dot-live{background:var(--danger);box-shadow:0 0 6px var(--danger)}
+  @keyframes dot-pulse{0%,100%{opacity:1}50%{opacity:.25}}
   .topbar .spacer{flex:1}
   .participants{display:flex;align-items:center;gap:-4px}
   .avatar{
@@ -297,6 +300,8 @@
   .conn-status.connecting .dot{background:var(--amber);box-shadow:0 0 6px var(--amber)}
   .conn-status.online .dot{background:var(--green);box-shadow:0 0 6px var(--green)}
   .conn-status.error .dot{background:var(--danger);box-shadow:0 0 6px var(--danger)}
+  .conn-status.reconnecting{color:var(--amber);border-color:rgba(255,184,0,.4)}
+  .conn-status.reconnecting .dot{background:var(--amber);box-shadow:0 0 6px var(--amber);animation:dot-pulse 1s infinite}
 
   /* Подсказка на пустом холсте */
   .empty-hint{
@@ -586,6 +591,6 @@
   }, 10000);
 })();
 </script>
-<script type="module" src="./app.js?v=10"></script>
+<script type="module" src="./app.js?v=11"></script>
 </body>
 </html>
