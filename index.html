@@ -43,7 +43,12 @@
   html,body{margin:0;padding:0;height:100%;width:100%;overflow:hidden;background:var(--bg-0);color:var(--text);
     font-family:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.5;
     -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
-  body{overscroll-behavior:none}
+  body{overscroll-behavior:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;
+    -webkit-tap-highlight-color:transparent}
+  /* Поля ввода — выделение текста нужно */
+  input,textarea,button{ -webkit-user-select:auto;user-select:auto }
+  /* SVG-иконки и canvas — тоже без callout (долгий тап на iOS) */
+  canvas,svg{ -webkit-touch-callout:none }
   button,input,select{font-family:inherit;color:inherit}
   ::selection{background:rgba(0,229,255,.35)}
 
@@ -354,7 +359,7 @@
 
   /* Десктоп */
   @media (min-width:1024px){
-    .toolbar{flex-direction:column;align-items:stretch;gap:8px;padding:10px;width:64px;
+    .toolbar{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:8px;padding:10px;width:64px;
       border-top:0;border-right:1px solid var(--border);overflow-y:auto;overflow-x:hidden}
     .tool-group{flex-direction:column;padding:4px}
     .color-swatches{flex-wrap:wrap;justify-content:center;max-width:48px}
@@ -363,8 +368,9 @@
       -webkit-appearance:slider-vertical;appearance:slider-vertical}
     .layer-select{font-size:.7rem;padding:6px 4px;text-align:center}
     /* На десктопе «⋯ Ещё» не нужен — меню всегда развёрнуто в сайдбаре */
-    .more-menu{position:static;display:flex;background:transparent;border:0;padding:0;box-shadow:none;min-width:0}
-    .more-menu .tool-group{background:var(--bg-2)}
+    .more-menu{position:static;display:flex;width:100%;align-self:stretch;align-items:stretch;
+      right:auto;bottom:auto;background:transparent;border:0;padding:0;box-shadow:none;min-width:0}
+    .more-menu .tool-group{background:var(--bg-2);width:100%;justify-content:center}
     #btn-more{display:none}
     .stage{margin-left:0}
     #room{flex-direction:row}
@@ -628,6 +634,6 @@ if ('serviceWorker' in navigator) {
   });
 }
 </script>
-<script type="module" src="./app.js?v=12"></script>
+<script type="module" src="./app.js?v=13"></script>
 </body>
 </html>
