@@ -755,6 +755,13 @@ function onMetaChange() {
   state.isHost = hostId === state.userId;
   refreshHostUI();
   updateModeUI();
+  // Логический размер холста пришёл от хоста (или изменился) → re-fit.
+  const lw = state.yMeta.get('canvasW'), lh = state.yMeta.get('canvasH');
+  if (lw && lh && (lw !== state._lastLW || lh !== state._lastLH)) {
+    state._lastLW = lw; state._lastLH = lh;
+    fitView();
+    redrawMain(); redrawOverlay();
+  }
 }
 
 function refreshHostUI() {
@@ -941,7 +948,43 @@ function updateEmptyHint() {
 
 // ============ Холст ============
 let dpr = 1;
-let canvasW = 0, canvasH = 0;
+let canvasW = 0, canvasH = 0;           // размер stage в CSS-пикселях (экран)
+// Логический холст: фиксированное координатное пространство, в котором хранятся
+// штрихи. Все устройства fit-contain его в свой экран → рисунок с ПК виден на
+// телефоне целиком (а не top-left угол). Хост может переопределить размер под
+// свой экран (yMeta.canvasW/H) — тогда аспект сохранится.
+const LOGICAL_W_DEFAULT = 1280, LOGICAL_H_DEFAULT = 800;
+function logicalSize() {
+  const w = (state.yMeta && state.yMeta.get('canvasW')) || LOGICAL_W_DEFAULT;
+  const h = (state.yMeta && state.yMeta.get('canvasH')) || LOGICAL_H_DEFAULT;
+  return { w, h };
+}
+// view: логические координаты → координаты экрана. screen = logical * scale + offset.
+const view = { scale: 1, ox: 0, oy: 0 };
+state.view = view;
+
+function fitView() {
+  const { w: lw, h: lh } = logicalSize();
+  if (canvasW <= 0 || canvasH <= 0 || lw <= 0 || lh <= 0) return;
+  const s = Math.min(canvasW / lw, canvasH / lh);
+  view.scale = s;
+  view.ox = (canvasW - lw * s) / 2;
+  view.oy = (canvasH - lh * s) / 2;
+}
+// Применить view-трансформ к контексту (для отрисовки штрихов в логических коорд.)
+function applyView(ctx) {
+  ctx.setTransform(view.scale * dpr, 0, 0, view.scale * dpr, view.ox * dpr, view.oy * dpr);
+}
+// Zoom вокруг точки экрана (sx,sy) с учётом dpi-экрана.
+function zoomAt(sx, sy, factor) {
+  const lx = (sx - view.ox) / view.scale;
+  const ly = (sy - view.oy) / view.scale;
+  const newScale = Math.max(0.1, Math.min(8, view.scale * factor));
+  view.scale = newScale;
+  view.ox = sx - lx * newScale;
+  view.oy = sy - ly * newScale;
+  redrawMain(); redrawOverlay();
+}
 
 function initCanvas() {
   onResize();
@@ -952,6 +995,13 @@ function initCanvas() {
   stage.addEventListener('pointerup', onPointerUp);
   stage.addEventListener('pointerleave', onPointerUp);
   stage.addEventListener('pointercancel', onPointerUp);
+  // Wheel-zoom (десктоп): колесо = зум вокруг курсора. Ctrl+колесо тоже зум.
+  stage.addEventListener('wheel', e => {
+    e.preventDefault();
+    const [sx, sy] = screenCoord(e);
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    zoomAt(sx, sy, factor);
+  }, { passive: false });
   stage.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
   stage.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
   stage.style.touchAction = 'none';
@@ -970,15 +1020,27 @@ function onResize() {
     c.style.width = canvasW + 'px';
     c.style.height = canvasH + 'px';
   }
-  mainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  liveCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Хост один раз фиксирует логический размер под свой экран (aspect сохранится
+  // для joiner'ов). Не-хост читает canvasW/H из yMeta (через Realtime).
+  if (state.isHost && state.yMeta && !state.yMeta.get('canvasW') && canvasW > 0) {
+    state.yMeta.set('canvasW', Math.round(canvasW));
+    state.yMeta.set('canvasH', Math.round(canvasH));
+  }
+  fitView();
   redrawMain();
   redrawOverlay();
 }
 
 function pointerCoord(e) {
   const rect = stage.getBoundingClientRect();
-  return [e.clientX - rect.left, e.clientY - rect.top];
+  const sx = e.clientX - rect.left;
+  const sy = e.clientY - rect.top;
+  // экранные → логические (инверсия view-трансформ)
+  return [(sx - view.ox) / view.scale, (sy - view.oy) / view.scale];
+}
+// логические → экранные (для позиционирования DOM-элементов, напр. текст-input)
+function logicalToScreen(lx, ly) {
+  return [lx * view.scale + view.ox, ly * view.scale + view.oy];
 }
 
 function canDrawNow() {
@@ -987,11 +1049,72 @@ function canDrawNow() {
   return state.yMeta.get('currentTurn') === state.userId;
 }
 
-// ============ Рисование ============
+// ============ Рисование + pan/zoom ============
+// Активные указатели для multi-touch (pinch-zoom / two-finger pan).
+const pointers = new Map();          // pointerId → {sx, sy} (экранные coords)
+let pinch = null;                    // {dist0, midSx0, midSy0, scale0, ox0, oy0}
+let pan = null;                      // {sx0, sy0, ox0, oy0} для hand-инструмента
+
+function screenCoord(e) {
+  const rect = stage.getBoundingClientRect();
+  return [e.clientX - rect.left, e.clientY - rect.top];
+}
+
+function startPinch() {
+  const pts = [...pointers.values()];
+  if (pts.length < 2) return;
+  const [a, b] = pts;
+  const dx = b.sx - a.sx, dy = b.sy - a.sy;
+  pinch = {
+    dist0: Math.hypot(dx, dy) || 1,
+    midSx0: (a.sx + b.sx) / 2,
+    midSy0: (a.sy + b.sy) / 2,
+    scale0: view.scale,
+    ox0: view.ox,
+    oy0: view.oy,
+  };
+  // Прерываем текущее рисование ( второй палец = жест навигации, не штрих)
+  if (state.isDrawing) {
+    state.isDrawing = false;
+    state.currentStroke = null;
+    pushAwareness();
+    redrawOverlay();
+  }
+}
+function updatePinch() {
+  if (!pinch) return;
+  const pts = [...pointers.values()];
+  if (pts.length < 2) { pinch = null; return; }
+  const [a, b] = pts;
+  const dist = Math.hypot(b.sx - a.sx, b.sy - a.sy) || 1;
+  const midSx = (a.sx + b.sx) / 2, midSy = (a.sy + b.sy) / 2;
+  // Логическая точка под начальным центром — должна оставаться под новым центром.
+  const lx = (pinch.midSx0 - pinch.ox0) / pinch.scale0;
+  const ly = (pinch.midSy0 - pinch.oy0) / pinch.scale0;
+  const newScale = Math.max(0.1, Math.min(8, pinch.scale0 * (dist / pinch.dist0)));
+  view.scale = newScale;
+  // Сдвиг: новый центр + pan-дельта (mid переместился)
+  view.ox = midSx - lx * newScale + (midSx - pinch.midSx0);
+  view.oy = midSy - ly * newScale + (midSy - pinch.midSy0);
+  redrawMain(); redrawOverlay();
+}
+
 function onPointerDown(e) {
   if (state.destroyed) return;
-  if (!canDrawNow()) { showToast('Не ваш ход', 'error', 1200); return; }
+  const [sx, sy] = screenCoord(e);
+  pointers.set(e.pointerId, { sx, sy });
+  // Второй палец → pinch-zoom/pan (навигация), рисование прерывается.
+  if (pointers.size >= 2) { startPinch(); return; }
   if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+  // Hand-инструмент: один палец/мышь = pan.
+  if (state.tool === 'hand') {
+    pan = { sx0: sx, sy0: sy, ox0: view.ox, oy0: view.oy };
+    try { stage.setPointerCapture(e.pointerId); } catch(_) {}
+    return;
+  }
+  if (!canDrawNow()) { showToast('Не ваш ход', 'error', 1200); return; }
+
   const [x, y] = pointerCoord(e);
   state._cursor = [x, y];
 
@@ -1019,12 +1142,23 @@ function onPointerDown(e) {
 }
 
 function onPointerMove(e) {
+  if (!pointers.has(e.pointerId) && e.pointerType !== 'mouse') return;
+  const [sx, sy] = screenCoord(e);
+  pointers.set(e.pointerId, { sx, sy });
+
+  if (pinch) { updatePinch(); return; }
+  if (pan) {
+    view.ox = pan.ox0 + (sx - pan.sx0);
+    view.oy = pan.oy0 + (sy - pan.sy0);
+    redrawMain(); redrawOverlay();
+    return;
+  }
   const [x, y] = pointerCoord(e);
   state._cursor = [x, y];
   if (state.isDrawing && state.currentStroke) {
     const pts = state.currentStroke.points;
     const last = pts[pts.length - 1];
-    if (Math.hypot(x - last[0], y - last[1]) > 1.2) {
+    if (Math.hypot(x - last[0], y - last[1]) > 1.2 / view.scale) {
       pts.push([x, y]);
       pushCursorAwareness();
       redrawOverlay();
@@ -1035,6 +1169,13 @@ function onPointerMove(e) {
 }
 
 function onPointerUp(e) {
+  pointers.delete(e.pointerId);
+  if (pan) {
+    try { stage.releasePointerCapture(e.pointerId); } catch(_) {}
+    pan = null;
+    return;
+  }
+  if (pinch && pointers.size < 2) { pinch = null; }
   if (!state.isDrawing) return;
   try { stage.releasePointerCapture(e.pointerId); } catch(_) {}
   const stroke = state.currentStroke;
@@ -1058,14 +1199,22 @@ function spawnTextInput(x, y) {
   input.type = 'text';
   input.className = 'text-input';
   input.placeholder = 'Текст…';
-  input.style.left = x + 'px';
-  input.style.top = (y - 14) + 'px';
-  const fontSize = clamp(state.size * 3, 14, 72);
-  input.style.fontSize = fontSize + 'px';
+  input.setAttribute('autocomplete', 'off');
+  input.setAttribute('autocorrect', 'off');
+  input.setAttribute('inputmode', 'text');
+  input.setAttribute('enterkeyhint', 'done');
+  // x,y — логические координаты. DOM позиционируется в экранном пространстве stage.
+  const [sx, sy] = logicalToScreen(x, y);
+  input.style.left = sx + 'px';
+  input.style.top = (sy - 14 * view.scale) + 'px';
+  const fontSize = clamp(state.size * 3, 14, 72) * view.scale;
+  input.style.fontSize = Math.max(13, fontSize) + 'px';
   input.style.color = state.color;
   input.style.borderColor = state.color;
   stage.appendChild(input);
-  setTimeout(() => input.focus(), 10);
+  // ВАЖНО: focus() синхронно, в обработчике тапа — иначе iOS не откроет клавиатуру.
+  // setTimeout рвал user-gesture chain; теперь вызываем сразу после вставки в DOM.
+  try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
 
   let committed = false;
   const commit = () => {
@@ -1108,7 +1257,9 @@ function onStrokesChange() {
 
 function redrawMain() {
   if (state.destroyed) return;
+  mainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   mainCtx.clearRect(0, 0, canvasW, canvasH);
+  applyView(mainCtx);
   const arr = state.yStrokes.toArray();
   arr.sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
   for (const s of arr) drawStroke(mainCtx, s);
@@ -1116,7 +1267,9 @@ function redrawMain() {
 
 function redrawOverlay() {
   if (state.destroyed) return;
+  liveCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   liveCtx.clearRect(0, 0, canvasW, canvasH);
+  applyView(liveCtx);
   if (state.isDrawing && state.currentStroke) {
     drawStroke(liveCtx, state.currentStroke);
   }
@@ -1187,8 +1340,9 @@ function drawCursor(ctx, x, y, color, nick, drawing) {
     ctx.font = '600 11px Inter, system-ui, sans-serif';
     const label = nick.slice(0, 14);
     const w = ctx.measureText(label).width + 10;
+    const { w: lw } = logicalSize();
     let lx = x + 10, ly = y - 18;
-    if (lx + w > canvasW) lx = x - w - 10;
+    if (lx + w > lw) lx = x - w - 10;
     if (ly < 4) ly = y + 14;
     ctx.fillStyle = 'rgba(10,13,18,.78)';
     ctx.fillRect(lx, ly, w, 18);
@@ -1207,6 +1361,11 @@ function setupToolbar() {
       state.tool = btn.dataset.tool;
     });
   });
+  // Zoom-контрол: Fit (вписать), +/- вокруг центра экрана.
+  const zIn = $('#btn-zoom-in'), zOut = $('#btn-zoom-out'), zFit = $('#btn-fit');
+  if (zIn) zIn.addEventListener('click', () => zoomAt(canvasW / 2, canvasH / 2, 1.2));
+  if (zOut) zOut.addEventListener('click', () => zoomAt(canvasW / 2, canvasH / 2, 1 / 1.2));
+  if (zFit) zFit.addEventListener('click', () => { fitView(); redrawMain(); redrawOverlay(); });
   $('#color-input').addEventListener('input', e => {
     state.color = e.target.value;
     syncSwatchActive();
@@ -1308,13 +1467,19 @@ function clearCanvas() {
 }
 
 function downloadPNG() {
+  // Экспорт в логических координатах (без view-трансформа): весь рисунок целиком.
+  const { w: lw, h: lh } = logicalSize();
+  const scale = 2;                         // 2× для чёткости
   const out = document.createElement('canvas');
-  out.width = mainCanvas.width;
-  out.height = mainCanvas.height;
+  out.width = Math.max(1, Math.round(lw * scale));
+  out.height = Math.max(1, Math.round(lh * scale));
   const octx = out.getContext('2d');
   octx.fillStyle = '#11161f';
   octx.fillRect(0, 0, out.width, out.height);
-  octx.drawImage(mainCanvas, 0, 0);
+  octx.setTransform(scale, 0, 0, scale, 0, 0);
+  const arr = (state.yStrokes ? state.yStrokes.toArray() : []).slice();
+  arr.sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
+  for (const s of arr) drawStroke(octx, s);
   const link = document.createElement('a');
   link.download = `catscribbles-${state.roomCode}-${Date.now()}.png`;
   link.href = out.toDataURL('image/png');
@@ -1337,7 +1502,7 @@ function strokeToPath(s) {
   return d;
 }
 function downloadSVG() {
-  const W = mainCanvas.width, H = mainCanvas.height;
+  const { w: W, h: H } = logicalSize();
   const arr = (state.yStrokes ? state.yStrokes.toArray() : []).slice();
   arr.sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
   let body = '';
