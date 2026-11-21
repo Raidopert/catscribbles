@@ -2,18 +2,16 @@
 // CatScribbles (КошачьиЗакорючки) — совместная доска для рисования в реальном времени
 // Архитектура:
 //   • Yjs (CRDT) — общее состояние (штрихи, мета, ходы)
-//   • Trystero 0.20.0 (supabase-стратегия: Realtime-каналы) — P2P-сигналинг
-//   • Ручная реализация Yjs sync-протокола через makeAction (step1/step2/update)
-//   • Awareness (курсоры, ник, цвет, live-штрих) через отдельный makeAction
+//   • Supabase Realtime — единый транспорт: broadcast (Yjs-sync + awareness)
+//     и Presence (обнаружение пиров). WebSocket — пробивается через VPN/NAT/
+//     корп. фаерволы, в отличие от WebRTC data-channel.
 //   • Supabase-таблица catscribbles_rooms — авто-persistence (заметка переживает закрытие)
-// WebRTC-данные идут напрямую между пирами; сигналинг и хранение — на Supabase.
+// P2P WebRTC убран: data-channel не открывался у части юзеров (VPN, symmetric NAT),
+// поэтому sync, awareness и presence — всё через Supabase Realtime (server-relayed).
 // ====================================================================
 
 import * as Y from 'https://esm.sh/yjs@13.6.21';
-// Сигналинг: supabase (Realtime-каналы) — надёжно, глобально, работает в Safari iOS.
-// Решает peers:0 (публичные трекеры/nostr-реляции были нестабильны у части юзеров).
-// Trystero supabase: createClient(appId=URL, supabaseKey). rtcConfig с TURN для NAT.
-import { joinRoom, selfId } from 'https://esm.sh/trystero@0.20.0/supabase';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import QRCode from 'https://esm.sh/qrcode@1.5.4';
 
 // ============ Константы ============
@@ -29,19 +27,25 @@ const SB_URL = 'https://gpwsnefhaiawoigqdnnr.supabase.co';
 const SB_KEY = 'sb_publishable_edH7sk8jpGTBLDG9F4G8mA_2HCDsOR-';
 const SB_TABLE = 'catscribbles_rooms';
 const SB_REST = SB_URL + '/rest/v1/' + SB_TABLE;
-const RTC_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-    // Бесплатный публичный TURN (OpenRelay by Metered) — критично для мобильных
-    // за симметричным NAT: STUN--only не пробивает, data-channel не открывается.
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  ],
-};
+
+// Supabase-клиент для Realtime-broadcast (надёжная доставка штрихов + presence
+// через WSS — работает там, где WebRTC data-channel не пробивается: VPN,
+// symmetric NAT, корп. фаерволы). Trystero/P2P убран: sync, awareness и
+// presence — всё через Supabase Realtime.
+const sb = createClient(SB_URL, SB_KEY);
+
+// Uint8Array ↔ base64 (Realtime-broadcast payload должен быть JSON-сериализуем).
+function u8ToB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+function b64ToU8(b64) {
+  const s = atob(b64);
+  const u8 = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i);
+  return u8;
+}
 
 // ============ Утилиты ============
 function uuid() {
@@ -50,6 +54,16 @@ function uuid() {
     const r = Math.random() * 16 | 0;
     return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
   });
+}
+// Персистентный id пользователя (в localStorage) — замена Trystero selfId.
+// Стабилен между перезагрузками → хост-миграция и rejoin работают корректно.
+function localUserId() {
+  try {
+    const k = 'cs_uid_v1';
+    let id = localStorage.getItem(k);
+    if (!id) { id = 'u-' + uuid(); localStorage.setItem(k, id); }
+    return id;
+  } catch (e) { return 'u-' + uuid(); }
 }
 function genRoomCode() {
   // 6 символов из алфавита без похожих символов (без I,O,0,1) — ~617 млн комбинаций
@@ -102,7 +116,7 @@ const state = {
   yMeta: null,       // Y.Map: { hostId, mode, currentTurn, turnOrder }
   roomId: null,
   roomCode: null,
-  userId: selfId,    // Trystero selfId — уникальный в комнате
+  userId: localUserId(),    // персистентный id (localStorage) — замена Trystero selfId
   nick: '',
   userColor: USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)],
   isHost: false,
@@ -390,6 +404,7 @@ function persistNow() {
 // Флаш при закрытии вкладки: keepalive-запрос переживает unload — заметка сохранится.
 function flushPersistOnExit() {
   if (!state.ydoc || state.destroyed || !state.roomId) return;
+  try { state.rtChannel && state.rtChannel.untrack(); } catch(e){}  // быстрый leave для presence
   const strokes = state.yStrokes ? state.yStrokes.length : 0;
   if (strokes > 0) {
     const snap = encodeSnapshot();
@@ -466,21 +481,11 @@ async function enterRoom(code) {
 
   // 2) Trystero-комната (supabase-стратегия: Realtime-каналы + STUN/TURN).
   //    appId здесь = URL Supabase (особенность стратегии), supabaseKey = publishable.
-  let room;
-  try {
-    room = joinRoom({ appId: SB_URL, supabaseKey: SB_KEY, rtcConfig: RTC_CONFIG }, state.roomId);
-    state.room = room;
-  } catch (e) {
-    console.error('Trystero init failed', e);
-    showToast('Не удалось инициализировать P2P. Обновите страницу.', 'error', 4000);
-    return;
-  }
-
-  // 3) Ручной Yjs sync-протокол через 3 makeAction (бинарные Uint8Array)
-  const yjsSync = setupYjsSync(ydoc, room);
-
-  // 4) Awareness (JSON: ник, цвет, курсор, live-штрих)
-  setupAwareness(room);
+  // 3) Yjs sync + awareness + presence — всё через Supabase Realtime (WebSocket).
+  //    Надёжно пробивается через VPN/NAT; P2P WebRTC data-channel на таких сетях
+  //    не открывается, поэтому отказались от Trystero в пользу Realtime-broadcast.
+  state.rtChannel = setupRealtimeSync(ydoc, state.roomId);
+  setupAwareness(state.rtChannel);
 
   // 5) Инициализация меты: создатель — хост
   if (state.isHost) {
@@ -496,45 +501,8 @@ async function enterRoom(code) {
   state.yStrokes.observe(onStrokesChange);
   state.yMeta.observe(onMetaChange);
 
-  // 7) События пиров Trystero (ВАЖНО: onPeerJoin/onPeerLeave заменяют обработчик,
-  //    поэтому регистрируем ОДИН раз — объединяем счётчик, awareness и Yjs sync)
-  room.onPeerJoin((peerId) => {
-    state.peers++;
-    if (state.reconnecting) {            // обрыв → связь восстановлена
-      state.reconnecting = false;
-      if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
-      showToast('Связь восстановлена', 'success', 1600);
-    }
-    state.hadPeers = true;
-    updateConnStatus();
-    pushAwareness();
-    // Yjs sync: отправляем новому пиру свой state vector
-    yjsSync.sendStep1(peerId);
-  });
-  room.onPeerLeave((peerId) => {
-    state.peers = Math.max(0, state.peers - 1);
-    const leftUserId = state.peerUserId.get(peerId);
-    state.peerAwareness.delete(peerId);
-    state.peerUserId.delete(peerId);
-    // Все пиры ушли, но раньше были → возможно обрыв связи (Trystero ретраит подписку).
-    if (state.peers === 0 && state.hadPeers && !state.reconnecting) {
-      state.reconnecting = true;
-      updateConnStatus();
-      if (_reconnectTimer) clearTimeout(_reconnectTimer);
-      _reconnectTimer = setTimeout(() => {
-        state.reconnecting = false;
-        _reconnectTimer = null;
-        updateConnStatus();
-      }, 12000);
-    } else {
-      updateConnStatus();
-    }
-    updateParticipants();
-    redrawOverlay();
-    if (leftUserId && state.yMeta.get('hostId') === leftUserId) {
-      migrateHost();
-    }
-  });
+  // 7) Presence теперь обрабатывается в setupRealtimeSync (Realtime Presence:
+  //    join/leave/sync). Trystero onPeerJoin/onPeerLeave больше не используются.
 
   // 8) UI
   landing.style.display = 'none';
@@ -590,96 +558,161 @@ async function enterRoom(code) {
   console.log('[CatScribbles] room joined', state.roomCode, 'as', state.userId.slice(0, 8));
 }
 
-// ============ Yjs sync: ручная реализация стандартного протокола ============
-// Три бинарных действия (Uint8Array):
-//   • yjs-step1: state vector — отправляем новому пиру, чтобы он знал что у нас есть
-//   • yjs-step2: state update (diff) — ответ на step1, применяем у получателя
-//   • yjs-update: инкрементальный update — рассылаем при локальном изменении
-// Возвращает { sendStep1(peerId) } — вызвать при onPeerJoin.
-function setupYjsSync(ydoc, room) {
-  const [sendStep1, onStep1] = room.makeAction('yjs-step1');
-  const [sendStep2, onStep2] = room.makeAction('yjs-step2');
-  const [sendUpdate, onUpdate] = room.makeAction('yjs-update');
-
-  // Счётчики для диагностики (видны в debug-баре через window.__cs.syncStats)
-  const stats = { step1Sent: 0, step1Recv: 0, step2Sent: 0, step2Recv: 0, updateSent: 0, updateRecv: 0, applyOk: 0, applyFail: 0, lastErr: '' };
+// ============ Yjs sync через Supabase Realtime broadcast ============
+// Доставка штрихов идёт по WebSocket (Supabase Realtime), а не по WebRTC data-channel.
+// Это надёжно пробивается через VPN, symmetric NAT и корпоративные фаерволы —
+// P2P data-channel (Trystero makeAction) на таких сетях не открывается.
+// События канала:
+//   • 'sync'  — полный state-as-update (новый подписчик получает актуальный рисунок)
+//   • 'u'     — инкрементальный update (рассылаем при каждом локальном изменении)
+// Возвращает realtime-канал.
+function setupRealtimeSync(ydoc, roomId) {
+  const stats = { rtSent: 0, rtRecv: 0, syncSent: 0, syncRecv: 0, applyOk: 0, applyFail: 0, subStatus: 'pending', lastErr: '' };
   state.syncStats = stats;
 
-  // Защитное приведение к Uint8Array: Trystero и так доставляет Uint8Array для
-  // бинарных makeAction, но на всякий случай (ArrayBuffer / view со сдвигом).
-  const toU8 = (d) => {
-    if (d instanceof Uint8Array) return d;
-    if (d instanceof ArrayBuffer) return new Uint8Array(d);
-    if (d && d.buffer instanceof ArrayBuffer) return new Uint8Array(d.buffer, d.byteOffset || 0, d.byteLength);
-    return new Uint8Array(d);
+  const chan = sb.channel('cs:' + roomId, {
+    config: { broadcast: { self: false }, presence: { key: state.userId } },
+  });
+
+  // ===== Presence (обнаружение пиров) через Supabase Realtime =====
+  // Надёжнее Trystero onPeerJoin/onPeerLeave: работает на любом WebView/VPN,
+  // т.к. это тот же WebSocket, что и broadcast. Драйвит state.peers + conn-status.
+  const onPeerHere = (p) => {
+    if (!p || !p.id || p.id === state.userId) return;
+    state.peers++;
+    if (state.reconnecting) {                 // обрыв → связь восстановлена
+      state.reconnecting = false;
+      if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+      showToast('Связь восстановлена', 'success', 1600);
+    }
+    state.hadPeers = true;
+    if (p.nick || p.color) {
+      state.peerAwareness.set(p.id, { id: p.id, nick: p.nick, color: p.color });
+      state.peerUserId.set(p.id, p.id);
+    }
+    updateConnStatus();
+    updateParticipants();
+    pushAwareness();
   };
-
-  // Получили state vector от пира — отвечаем diff'ом нашего состояния
-  onStep1((vector, peerId) => {
-    stats.step1Recv++;
+  const onPeerGone = (p) => {
+    if (!p || !p.id || p.id === state.userId) return;
+    state.peers = Math.max(0, state.peers - 1);
+    state.peerAwareness.delete(p.id);
+    state.peerUserId.delete(p.id);
+    if (state.peers === 0 && state.hadPeers && !state.reconnecting) {
+      state.reconnecting = true;
+      updateConnStatus();
+      if (_reconnectTimer) clearTimeout(_reconnectTimer);
+      _reconnectTimer = setTimeout(() => { state.reconnecting = false; _reconnectTimer = null; updateConnStatus(); }, 12000);
+    } else {
+      updateConnStatus();
+    }
+    updateParticipants();
+    redrawOverlay();
+    if (p.id && state.yMeta.get('hostId') === p.id) migrateHost();
+  };
+  chan.on('presence', { event: 'join' }, ({ newPresences }) => (newPresences || []).forEach(onPeerHere));
+  chan.on('presence', { event: 'leave' }, ({ leftPresences }) => (leftPresences || []).forEach(onPeerGone));
+  // sync — полный снимок presence (приходит после подписки/переподключения):
+  // сверяем с известными, чтобы не потерять и не задвоить счётчик.
+  chan.on('presence', { event: 'sync' }, () => {
     try {
-      const update = Y.encodeStateAsUpdate(ydoc, toU8(vector));
-      if (update.byteLength > 2) { sendStep2(update, peerId); stats.step2Sent++; }
-    } catch (e) { stats.lastErr = 'step1:' + e.message; console.warn('step2 send failed', e); }
+      const pres = chan.presenceState() || {};
+      const ids = Object.keys(pres).filter(id => id !== state.userId);
+      const known = new Set([...state.peerAwareness.keys()].filter(id => id !== state.userId));
+      let added = 0, removed = 0;
+      for (const id of ids) { if (!known.has(id)) { const arr = pres[id]; if (arr && arr[0]) onPeerHere(arr[0]); added++; } }
+      for (const id of known) { if (!ids.includes(id)) { onPeerGone({ id }); removed++; } }
+    } catch (e) { stats.lastErr = 'pres-sync:' + e.message; }
   });
 
-  // Получили state update — применяем
-  onStep2((update, peerId) => {
-    stats.step2Recv++;
-    try { Y.applyUpdate(ydoc, toU8(update), 'remote'); stats.applyOk++; }
-    catch (e) { stats.applyFail++; stats.lastErr = 'step2:' + e.message; console.warn('step2 apply failed', e); }
+  // Получили полный state — применяем (пришёл от уже сидящего в комнате пира)
+  chan.on('broadcast', { event: 'sync' }, ({ payload }) => {
+    stats.syncRecv++;
+    try { Y.applyUpdate(ydoc, b64ToU8(payload), 'remote'); stats.applyOk++; }
+    catch (e) { stats.applyFail++; stats.lastErr = 'sync:' + e.message; console.warn('rt sync apply failed', e); }
   });
 
-  // Локальное изменение — рассылаем инкрементальный update всем
-  ydoc.on('update', (update, origin) => {
-    if (origin === 'remote') return;
-    try { sendUpdate(toU8(update), null); stats.updateSent++; } catch (e) { /* peer might be gone */ }
+  // Получили запрос актуального state — отвечаем своим полным state.
+  // Нужно для поздних joiner'ов: они подписались после того, как мы отправили
+  // свой sync при SUBSCRIBED, и тот до них не дошёл. По запросу — переотправляем.
+  chan.on('broadcast', { event: 'req' }, () => {
+    try {
+      const full = Y.encodeStateAsUpdate(ydoc);
+      if (full.byteLength > 2) {
+        chan.send({ type: 'broadcast', event: 'sync', payload: u8ToB64(full) });
+        stats.syncSent++;
+      }
+    } catch (e) { stats.lastErr = 'req-reply:' + e.message; }
   });
 
   // Получили инкрементальный update — применяем
-  onUpdate((update, peerId) => {
-    stats.updateRecv++;
-    try { Y.applyUpdate(ydoc, toU8(update), 'remote'); stats.applyOk++; }
-    catch (e) { stats.applyFail++; stats.lastErr = 'update:' + e.message; console.warn('update apply failed', e); }
+  chan.on('broadcast', { event: 'u' }, ({ payload }) => {
+    stats.rtRecv++;
+    try { Y.applyUpdate(ydoc, b64ToU8(payload), 'remote'); stats.applyOk++; }
+    catch (e) { stats.applyFail++; stats.lastErr = 'u:' + e.message; console.warn('rt update apply failed', e); }
   });
 
-  return {
-    sendStep1: (peerId) => {
+  // Локальное изменение Yjs-документа — рассылаем инкрементальный update всем
+  ydoc.on('update', (update, origin) => {
+    if (origin === 'remote') return;          // не эхим чужие обновления
+    try {
+      chan.send({ type: 'broadcast', event: 'u', payload: u8ToB64(update) });
+      stats.rtSent++;
+    } catch (e) { /* канал ещё не подписан / отвал — persistence подстрахует */ }
+  });
+
+  // Подписка установлена:
+  //   • рассылаем свой полный state (получат те, кто уже в канале)
+  //   • шлём req — попросим актуальный state у уже сидящих (для нас как late-joiner)
+  chan.subscribe((status, err) => {
+    stats.subStatus = status;
+    if (status === 'SUBSCRIBED') {
       try {
-        const vector = Y.encodeStateVector(ydoc);
-        sendStep1(vector, peerId);
-        stats.step1Sent++;
-      } catch (e) { stats.lastErr = 'sendStep1:' + e.message; console.warn('step1 send failed', e); }
-    },
-  };
+        // Заявляем о своём присутствии (presence) — другие пиры увидят join.
+        chan.track({ id: state.userId, nick: state.nick || ('user-' + state.userId.slice(0, 4)), color: state.userColor });
+        const full = Y.encodeStateAsUpdate(ydoc);
+        if (full.byteLength > 2) {
+          chan.send({ type: 'broadcast', event: 'sync', payload: u8ToB64(full) });
+          stats.syncSent++;
+        }
+        chan.send({ type: 'broadcast', event: 'req', payload: { t: 1 } });
+      } catch (e) { stats.lastErr = 'sub:' + e.message; }
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      stats.lastErr = status;
+    }
+  });
+
+  return chan;
 }
 
 // ============ Awareness (курсоры, ник, цвет, live-штрих) ============
 let sendAware = null, onAware = null;
 
-function setupAwareness(room) {
-  [sendAware, onAware] = room.makeAction('aware');
-  onAware((data, peerId) => {
+function setupAwareness(chan) {
+  // Awareness (курсоры, ник, цвет, live-штрих) — через Realtime broadcast,
+  // как и Yjs-sync. Ключуется по userId (state.userId).
+  chan.on('broadcast', { event: 'aware' }, ({ payload: data }) => {
     if (!data || !data.id) return;
-    state.peerAwareness.set(peerId, data);
-    state.peerUserId.set(peerId, data.id);
+    state.peerAwareness.set(data.id, data);
+    state.peerUserId.set(data.id, data.id);
     updateParticipants();
     redrawOverlay();
   });
 }
 
 function pushAwareness(extra = {}) {
-  if (!sendAware) return;
+  if (!state.rtChannel) return;
   const payload = {
     id: state.userId,
-    nick: state.nick || ('user-' + state.userId.slice(0, 4)),
+    nick: state.nick || ('user-' + state.userId.slice(0, 8)),
     color: state.userColor,
     cursor: state._cursor || null,
     drawing: state.isDrawing,
     liveStroke: state.isDrawing ? state.currentStroke : null,
     ...extra,
   };
-  try { sendAware(payload, null); } catch (e) { /* ignore */ }
+  try { state.rtChannel.send({ type: 'broadcast', event: 'aware', payload }); } catch (e) { /* ignore */ }
 }
 
 // Throttled awareness push для курсора (30 Гц)
@@ -842,7 +875,7 @@ function destroyRoom() {
   }} catch(e){}
   try { state.yStrokes && state.yStrokes.unobserve(onStrokesChange); } catch(e){}
   try { state.yMeta && state.yMeta.unobserve(onMetaChange); } catch(e){}
-  try { state.room && state.room.leave(); } catch(e){}
+  try { state.rtChannel && state.rtChannel.unsubscribe(); } catch(e){}
   try { state.ydoc && state.ydoc.destroy(); } catch(e){}
 }
 
@@ -1333,7 +1366,7 @@ function downloadSVG() {
   showToast('SVG скачан', 'success', 1400);
 }
 
-// ============ Debug-бар: диагностика P2P и Yjs sync ============
+// ============ Debug-бар: диагностика Realtime sync + presence ============
 function startDebugBar() {
   if (state._dbgTimer) clearInterval(state._dbgTimer);
   updateDebugBar();
@@ -1342,19 +1375,12 @@ function startDebugBar() {
 function updateDebugBar() {
   const bar = document.getElementById('debug-bar');
   if (!bar || state.destroyed) return;
-  // ICE-состояния пиров: показывают, реально ли открылся data-channel
-  const iceStates = [];
-  let dcOpen = 0;
+  // Presence: сколько пиров реально в канале (по Supabase Realtime Presence)
+  let presCount = 0;
   try {
-    const peers = state.room && state.room.getPeers ? state.room.getPeers() : null;
-    if (peers) {
-      // Trystero getPeers() возвращает обычный объект {peerId: RTCPeerConnection}
-      const entries = (peers instanceof Map) ? [...peers] : Object.entries(peers);
-      for (const [, pc] of entries) {
-        const cs = (pc && (pc.connectionState || pc.iceConnectionState)) || '?';
-        iceStates.push(cs);
-        if (cs === 'connected' || cs === 'completed') dcOpen++;
-      }
+    if (state.rtChannel) {
+      const pres = state.rtChannel.presenceState ? state.rtChannel.presenceState() : {};
+      presCount = Math.max(0, Object.keys(pres).length - 1);  // кроме себя
     }
   } catch (e) {}
   // Persistence: состояние сохранения в Supabase (db:ok = сохранено, ff = фолбэк на hash)
@@ -1365,10 +1391,10 @@ function updateDebugBar() {
   const strokes = state.yStrokes ? state.yStrokes.length : 0;
   const failTag = s.applyFail > 0 || s.lastErr ? ` <i>FAIL:${s.applyFail}${s.lastErr ? ' ' + s.lastErr : ''}</i>` : '';
   bar.innerHTML =
-    `<b>P2P</b> peers:${state.peers} dc:<b>${dcOpen}/${state.peers}</b> ice:[${iceStates.join(',')}] ` +
+    `<b>RT</b> ${s.subStatus || '—'} pres:<b>${presCount}</b> peers:${state.peers} ` +
     `<b>db</b>:${dbTag} ` +
     `<b>aware</b>:${aware} <b>strokes</b>:${strokes} ` +
-    `<b>sync</b> s1 ${s.step1Sent}/${s.step1Recv} s2 ${s.step2Sent}/${s.step2Recv} up ${s.updateSent}/${s.updateRecv} ok:${s.applyOk}` +
+    `<b>sync</b> up ${s.rtSent}/${s.rtRecv} sync ${s.syncSent}/${s.syncRecv} ok:${s.applyOk}` +
     failTag;
 }
 
