@@ -1,7 +1,7 @@
 # CatScribbles — КошачьиЗакорючки · совместная доска для рисования
 
 Бесплатное P2P-приложение для совместного рисования в реальном времени.
-Часть раздела «Программы» сайта **raidopert.ru**. Текущая версия: **v0.1.0**.
+Часть раздела «Программы» сайта **raidopert.ru**.
 
 ## Что это
 
@@ -9,18 +9,6 @@
 второй входит — и оба рисуют на одном холсте одновременно или по очереди.
 Рисование, стирание, текст, undo/redo, слои, смена цветов и толщины.
 **Без сервера, без регистрации, без сохранения** — комнаты эфемерные.
-
-## Загрузки (установщики)
-
-| Платформа | Файл | Ссылка |
-|---|---|---|
-| Windows 10/11 (x64) | `CATSCRIBBLES-Setup-0.1.0.exe` (~82 МБ, Electron + NSIS) | [Скачать установщик](https://github.com/Raidopert/catscribbles/releases/download/v0.1.0/CATSCRIBBLES-Setup-0.1.0.exe) |
-| Android 7.0+ | `CatScribbles-0.1.0.apk` (~141 КБ, WebView-обёртка) | [Скачать APK](https://github.com/Raidopert/catscribbles/releases/download/v0.1.0/CatScribbles-0.1.0.apk) |
-| Веб (любая платформа) | PWA, без установки | [raidopert.ru/catscribbles/](https://raidopert.ru/catscribbles/) |
-
-Все релизы: https://github.com/Raidopert/catscribbles/releases
-Установщики — обёртки того же веб-приложения: оболочка (index.html + app.js)
-встроена в пакет, CDN-модули и P2P-сигналинг подгружаются из сети при запуске.
 
 ## Архитектура (всё бесплатно на Vercel)
 
@@ -146,37 +134,3 @@ const RTC_CONFIG = {
 ## Лицензия
 
 Свободно для использования и модификации. Часть проекта raidopert.ru.
-
-## Сборка установщиков (Linux-тулчейн)
-
-### Android APK (см. android/README.md)
-
-Инструменты: build-tools 34 (`aapt2`, `d8`, `zipalign`, `apksigner`), platform-34
-(`android.jar`), JDK 21. Оболочка — 2 java-файла (`MainActivity`,
-`ScribbleWebViewClient`), статику берём из корня репо:
-
-```sh
-cp index.html app.js sw.js manifest.webmanifest icon-*.png apple-touch-icon.png android-build/assets/
-aapt2 compile --dir android/res -o android-build/res.zip
-aapt2 link -o base-unsigned.apk -I android.jar --manifest android/AndroidManifest.xml \
-  -A android-build/assets --min-sdk-version 24 --target-sdk-version 34 \
-  --version-code 1 --version-name 0.1.0 --auto-add-overlay android-build/res.zip
-javac -source 11 -target 11 -cp android.jar -d obj $(find android/java -name '*.java')
-d8 --release --lib android.jar --min-api 24 --output dex $(find obj -name '*.class')
-# classes.dex → в apk, zipalign -f 4, apksigner sign
-```
-
-Keystore: `android/keystore/catscribbles-release.jks`, alias `catscribbles`,
-пароли (store и key): `catscribbles2026`. Ключ терять нельзя — обновления
-устанавливаются поверх старых только при совпадении подписи.
-
-### Windows EXE (см. desktop/README.md)
-
-1. `python3 scripts/make-branding.py` — mipmaps, .ico, NSIS-битмапы из `icon-512.png`;
-2. распаковать portable Electron (win32-x64) в `desktop-build/win-unpacked/CatScribbles/`,
-   переименовать `electron.exe` → `CatScribbles.exe`;
-3. приложение — в `resources/app/` (`package.json`, `main.js`, `icon.ico`, `web/`);
-4. NSIS: `makensis desktop/installer.nsi` → `desktop-build/CATSCRIBBLES-Setup-0.1.0.exe`.
-
-NSIS-данные ищутся в `/usr/share/nsis`; при локальной распаковке deb без root —
-bind-mount внутри `unshare -Ur --mount`.
