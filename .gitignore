@@ -1,0 +1,4 @@
+android-build/
+desktop-build/
+.api-stash/
+*.log

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Фон холста CatScribbles (тёмный неон, bg-0 из index.html) -->
+    <color name="boot_bg">#0A0D12</color>
+</resources>
