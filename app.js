@@ -66,10 +66,10 @@ function localUserId() {
   } catch (e) { return 'u-' + uuid(); }
 }
 function genRoomCode() {
-  // 6 символов из алфавита без похожих символов (без I,O,0,1) — ~617 млн комбинаций
+  // 4 символа из алфавита без похожих (без I,O,0,1) — ~1 млн комбинаций, легко ввести/сканировать
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let s = '';
-  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 4; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return ROOM_PREFIX + s;
 }
 function roomCodeToTopic(code) {
@@ -559,6 +559,7 @@ async function enterRoom(code) {
   buildSwatches();
   setupToolbar();
   setupInstall();
+  setupTemplates();
   setupTopbar();
   updateModeUI();
   updateConnStatus();
@@ -840,27 +841,44 @@ function findPeerById(id) {
 
 // ============ Topbar ============
 // Онбординг: разовая карточка «как пользоваться» (один раз на браузер).
+const TOUR_STEPS = [
+  { sel: '#btn-brushes', title: '1. Кисти', text: '7 умных кистей: акварель, баллончик, царапины, неон. Нажмите здесь, чтобы выбрать.' },
+  { sel: '#btn-share', title: '2. Код и QR', text: 'Здесь — код комнаты и QR-код. Отправьте другу, чтобы рисовать вместе или оставить заметку.' },
+  { sel: '#stage', title: '3. Бесконечный холст', text: 'Рисуйте где угодно — холст без границ. Два пальца = зум/пан, как в Miro.' },
+];
 function showOnboarding() {
-  try { if (localStorage.getItem('cs_onboarded_v1')) return; } catch(e){}
-  const card = document.createElement('div');
-  card.id = 'onboard';
-  card.innerHTML =
-    '<div class="ob-emoji">👋</div>' +
-    '<div class="ob-title">Как пользоваться</div>' +
-    '<ol class="ob-steps">' +
-    '<li><b>Рисуйте</b> на холсте пальцем или мышью.</li>' +
-    '<li>Нажмите <b>«Сохранить»</b> — заметка уйдёт на сервер (или сохранится сама).</li>' +
-    '<li>Отправьте <b>ссылку</b> другу: он откроет её позже и увидит вашу заметку.</li>' +
-    '</ol>' +
-    '<button class="btn btn-primary ob-ok">Понятно</button>';
-  document.body.appendChild(card);
-  const dismiss = () => {
-    try { localStorage.setItem('cs_onboarded_v1', '1'); } catch(e){}
-    if (card.parentNode) card.remove();
-    state._onboardDismiss = null;
+  try { if (localStorage.getItem('cs_onboarded_v2')) return; } catch(e){}
+  const spot = document.createElement('div'); spot.id = 'tour-spot';
+  const tip = document.createElement('div'); tip.id = 'tour-tip';
+  document.body.appendChild(spot); document.body.appendChild(tip);
+  let i = 0;
+  const render = () => {
+    const step = TOUR_STEPS[i];
+    const el = document.querySelector(step.sel);
+    if (!el) { i++; if (i < TOUR_STEPS.length) render(); else finish(); return; }
+    const r = el.getBoundingClientRect();
+    const pad = 6;
+    spot.style.left = (r.left - pad) + 'px'; spot.style.top = (r.top - pad) + 'px';
+    spot.style.width = (r.width + pad * 2) + 'px'; spot.style.height = (r.height + pad * 2) + 'px';
+    const above = r.top > window.innerHeight * 0.55;
+    tip.innerHTML =
+      `<div class="tour-title">${step.title}</div>` +
+      `<div class="tour-text">${step.text}</div>` +
+      `<div class="tour-nav"><span class="tour-step">${i + 1}/${TOUR_STEPS.length}</span>` +
+      `<button class="tour-skip btn btn-ghost">Пропустить</button>` +
+      `<button class="tour-next btn btn-primary">${i < TOUR_STEPS.length - 1 ? 'Далее' : 'Готово'}</button></div>`;
+    tip.style.left = Math.max(12, Math.min(r.left, window.innerWidth - 272)) + 'px';
+    tip.style.top = above ? Math.max(12, r.top - 150) + 'px' : (r.bottom + 12) + 'px';
+    tip.querySelector('.tour-next').addEventListener('click', () => { i++; if (i < TOUR_STEPS.length) render(); else finish(); });
+    tip.querySelector('.tour-skip').addEventListener('click', finish);
   };
-  state._onboardDismiss = dismiss;
-  card.querySelector('.ob-ok').addEventListener('click', dismiss);
+  const finish = () => {
+    try { localStorage.setItem('cs_onboarded_v2', '1'); } catch(e){}
+    if (spot.parentNode) spot.remove();
+    if (tip.parentNode) tip.remove();
+  };
+  state._onboardDismiss = finish;
+  setTimeout(render, 400);   // подождать, пока тулбар отрисуется
 }
 function setupTopbar() {
   $('#room-badge').addEventListener('click', openShareModal);
@@ -990,16 +1008,72 @@ function logicalSize() {
   return { w, h };
 }
 // view: логические координаты → координаты экрана. screen = logical * scale + offset.
+// Холст бесконечный: нет фиксированных границ, рисовать можно где угодно,
+// сетка рисуется в канвасе и двигается/масштабируется вместе с контентом.
 const view = { scale: 1, ox: 0, oy: 0 };
 state.view = view;
+const GRID_BASE = 24;            // базовая ячейка сетки в логических px
+const MIN_ZOOM = 0.15, MAX_ZOOM = 8;
 
 function fitView() {
-  const { w: lw, h: lh } = logicalSize();
-  if (canvasW <= 0 || canvasH <= 0 || lw <= 0 || lh <= 0) return;
-  const s = Math.min(canvasW / lw, canvasH / lh);
+  if (canvasW <= 0 || canvasH <= 0) return;
+  // Центрируем начало координат (0,0), масштаб — чтобы ~900×600 логики влезало.
+  const s = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(canvasW / 900, canvasH / 600)));
   view.scale = s;
-  view.ox = (canvasW - lw * s) / 2;
-  view.oy = (canvasH - lh * s) / 2;
+  view.ox = canvasW / 2;
+  view.oy = canvasH / 2;
+}
+// Видимый логический прямоугольник (для сетки/экспорта).
+function visibleLogicalRect() {
+  const l = (0 - view.ox) / view.scale;
+  const t = (0 - view.oy) / view.scale;
+  return { l, t, r: (canvasW - view.ox) / view.scale, b: (canvasH - view.oy) / view.scale };
+}
+// Адаптивная бесконечная сетка: шаг = GRID_BASE * 2^k, чтобы на экране был ~24-96px.
+function drawGrid(ctx) {
+  const { l, t, r, b } = visibleLogicalRect();
+  if (r - l <= 0 || b - t <= 0) return;
+  let step = GRID_BASE;
+  while (step * view.scale < 24) step *= 2;
+  while (step * view.scale > 96) step /= 2;
+  const major = step * 5;
+  const sl = Math.floor(l / step) * step;
+  const st = Math.floor(t / step) * step;
+  ctx.save();
+  ctx.lineWidth = 1 / view.scale;             // всегда ~1px на экране
+  // мелкая сетка
+  ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+  ctx.beginPath();
+  for (let x = sl; x <= r; x += step) { ctx.moveTo(x, t); ctx.lineTo(x, b); }
+  for (let y = st; y <= b; y += step) { ctx.moveTo(l, y); ctx.lineTo(r, y); }
+  ctx.stroke();
+  // крупная сетка (каждая 5-я)
+  const sl5 = Math.floor(l / major) * major, st5 = Math.floor(t / major) * major;
+  ctx.strokeStyle = 'rgba(255,255,255,0.09)';
+  ctx.beginPath();
+  for (let x = sl5; x <= r; x += major) { ctx.moveTo(x, t); ctx.lineTo(x, b); }
+  for (let y = st5; y <= b; y += major) { ctx.moveTo(l, y); ctx.lineTo(r, y); }
+  ctx.stroke();
+  // оси (0,0)
+  ctx.strokeStyle = 'rgba(0,229,255,0.22)';
+  ctx.beginPath(); ctx.moveTo(0, t); ctx.lineTo(0, b); ctx.moveTo(l, 0); ctx.lineTo(r, 0); ctx.stroke();
+  ctx.restore();
+}
+// Bounding box всех штрихов (для экспорта — без пустых полей).
+function strokesBBox() {
+  const arr = state.yStrokes ? state.yStrokes.toArray() : [];
+  if (!arr.length) return { x: -400, y: -300, w: 800, h: 600 };
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const s of arr) {
+    if (!s.points) continue;
+    for (const [px, py] of s.points) {
+      if (px < minX) minX = px; if (py < minY) minY = py;
+      if (px > maxX) maxX = px; if (py > maxY) maxY = py;
+    }
+  }
+  if (!isFinite(minX)) return { x: -400, y: -300, w: 800, h: 600 };
+  const pad = 32;
+  return { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
 }
 // Применить view-трансформ к контексту (для отрисовки штрихов в логических коорд.)
 function applyView(ctx) {
@@ -1009,7 +1083,7 @@ function applyView(ctx) {
 function zoomAt(sx, sy, factor) {
   const lx = (sx - view.ox) / view.scale;
   const ly = (sy - view.oy) / view.scale;
-  const newScale = Math.max(0.1, Math.min(8, view.scale * factor));
+  const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, view.scale * factor));
   view.scale = newScale;
   view.ox = sx - lx * newScale;
   view.oy = sy - ly * newScale;
@@ -1131,6 +1205,7 @@ function updatePinch() {
 
 function onPointerDown(e) {
   if (state.destroyed) return;
+  if (state._onboardDismiss) state._onboardDismiss();   // тур уходит, когда начали рисовать
   const [sx, sy] = screenCoord(e);
   pointers.set(e.pointerId, { sx, sy });
   // Второй палец → pinch-zoom/pan (навигация), рисование прерывается.
@@ -1299,6 +1374,7 @@ function redrawMain() {
   mainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   mainCtx.clearRect(0, 0, canvasW, canvasH);
   applyView(mainCtx);
+  drawGrid(mainCtx);
   const arr = state.yStrokes.toArray();
   arr.sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
   for (const s of arr) drawStroke(mainCtx, s);
@@ -1646,6 +1722,7 @@ function setupToolbar() {
   $('#btn-clear').addEventListener('click', clearCanvas);
   $('#btn-download').addEventListener('click', downloadPNG);
   $('#btn-svg').addEventListener('click', downloadSVG);
+  $('#btn-pdf').addEventListener('click', downloadPDF);
   // «⋯ Ещё» — поповер с редкими действиями (undo/redo/download/clear/слой)
   const moreMenu = $('#more-menu');
   const moreBtn = $('#btn-more');
@@ -1727,16 +1804,16 @@ function clearCanvas() {
 }
 
 function downloadPNG() {
-  // Экспорт в логических координатах (без view-трансформа): весь рисунок целиком.
-  const { w: lw, h: lh } = logicalSize();
+  // Экспорт по bounding box всех штрихов (без пустых полей, бесконечный холст).
+  const bb = strokesBBox();
   const scale = 2;                         // 2× для чёткости
   const out = document.createElement('canvas');
-  out.width = Math.max(1, Math.round(lw * scale));
-  out.height = Math.max(1, Math.round(lh * scale));
+  out.width = Math.max(1, Math.round(bb.w * scale));
+  out.height = Math.max(1, Math.round(bb.h * scale));
   const octx = out.getContext('2d');
   octx.fillStyle = '#11161f';
   octx.fillRect(0, 0, out.width, out.height);
-  octx.setTransform(scale, 0, 0, scale, 0, 0);
+  octx.setTransform(scale, 0, 0, scale, -bb.x * scale, -bb.y * scale);
   const arr = (state.yStrokes ? state.yStrokes.toArray() : []).slice();
   arr.sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
   for (const s of arr) drawStroke(octx, s);
@@ -1762,7 +1839,7 @@ function strokeToPath(s) {
   return d;
 }
 function downloadSVG() {
-  const { w: W, h: H } = logicalSize();
+  const bb = strokesBBox();
   const arr = (state.yStrokes ? state.yStrokes.toArray() : []).slice();
   arr.sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
   let body = '', skipped = 0;
@@ -1794,8 +1871,8 @@ function downloadSVG() {
   if (!body) { showToast('Пусто — нечего выгружать', '', 1600); return; }
   const defs = body.includes('url(#neon)') ? `  <defs><filter id="neon" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${Math.round((state.size||4)*1.2)}"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>\n` : '';
   const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">\n` +
-    `  <rect width="${W}" height="${H}" fill="#11161f"/>\n` + defs + body + `</svg>`;
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${bb.x} ${bb.y} ${bb.w} ${bb.h}" width="${Math.round(bb.w)}" height="${Math.round(bb.h)}">\n` +
+    `  <rect x="${bb.x}" y="${bb.y}" width="${bb.w}" height="${bb.h}" fill="#11161f"/>\n` + defs + body + `</svg>`;
   const blob = new Blob([svg], { type: 'image/svg+xml' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -1804,6 +1881,123 @@ function downloadSVG() {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   showToast(skipped > 0 ? `SVG скачан (${skipped} растровых кистей пропущено — используйте PNG)` : 'SVG скачан', 'success', 1800);
+}
+
+// ============ Шаблоны холста ============
+function circlePts(cx, cy, r, n = 28) {
+  const p = [];
+  for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2; p.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); }
+  p.push(p[0]);
+  return p;
+}
+function mkStroke(tool, points, color, size, layer = 0) {
+  return { id: uuid(), tool, color, size, layer, author: state.userId, authorColor: state.userColor, points, ts: Date.now() };
+}
+// Каждый шаблон возвращает массив штрихов в логических координатах (центр в 0,0).
+const TEMPLATES = {
+  grid: () => {           // миллиметровка
+    const out = [], step = 40, X = 520, Y = 380;
+    for (let x = -X; x <= X; x += step) out.push(mkStroke('line', [[x, -Y], [x, Y]], '#3a4252', 1));
+    for (let y = -Y; y <= Y; y += step) out.push(mkStroke('line', [[-X, y], [X, y]], '#3a4252', 1));
+    return out;
+  },
+  music: () => {          // нотный стан (5 линий + тактовые черты)
+    const out = [], X0 = -440, X1 = 440, dys = [-60, -30, 0, 30, 60];
+    for (const dy of dys) out.push(mkStroke('line', [[X0, dy], [X1, dy]], '#6b7280', 1.5));
+    for (const x of [X0, -160, 120, X1]) out.push(mkStroke('line', [[x, -60], [x, 60]], '#6b7280', 1.5));
+    return out;
+  },
+  cat: () => {            // раскраска: кот
+    const out = [];
+    out.push(mkStroke('pen', circlePts(0, 10, 130), '#8a94a6', 2.5));            // голова
+    out.push(mkStroke('pen', [[-90, -70], [-60, -140], [-30, -90]], '#8a94a6', 2.5)); // левое ухо
+    out.push(mkStroke('pen', [[90, -70], [60, -140], [30, -90]], '#8a94a6', 2.5));   // правое ухо
+    out.push(mkStroke('pen', circlePts(-45, 0, 12, 16), '#8a94a6', 2.5));         // левый глаз
+    out.push(mkStroke('pen', circlePts(45, 0, 12, 16), '#8a94a6', 2.5));          // правый глаз
+    out.push(mkStroke('pen', [[-10, 40], [0, 50], [10, 40], [0, 60], [-10, 40]], '#8a94a6', 2.5)); // нос+рот
+    out.push(mkStroke('pen', [[-40, 55], [-110, 50]], '#8a94a6', 2));             // усы
+    out.push(mkStroke('pen', [[-40, 65], [-110, 70]], '#8a94a6', 2));
+    out.push(mkStroke('pen', [[40, 55], [110, 50]], '#8a94a6', 2));
+    out.push(mkStroke('pen', [[40, 65], [110, 70]], '#8a94a6', 2));
+    return out;
+  },
+  storyboard: () => {     // раскадровка 2×3
+    const out = [], w = 260, h = 170, gx = 20, gy = 20;
+    const x0 = -(3 * w + 2 * gx) / 2, y0 = -(2 * h + gy) / 2;
+    for (let r = 0; r < 2; r++) for (let c = 0; c < 3; c++) {
+      const x = x0 + c * (w + gx), y = y0 + r * (h + gy);
+      out.push(mkStroke('rect', [[x, y], [x + w, y + h]], '#5a6478', 2));
+    }
+    return out;
+  },
+  sudoku: () => {         // судоку 9×9, жирные 每 3
+    const out = [], step = 48, N = 9, total = step * N, off = -total / 2;
+    for (let i = 0; i <= N; i++) {
+      const p = off + i * step, thick = i % 3 === 0;
+      out.push(mkStroke('line', [[p, off], [p, off + total]], '#6b7280', thick ? 3 : 1));
+      out.push(mkStroke('line', [[off, p], [off + total, p]], '#6b7280', thick ? 3 : 1));
+    }
+    return out;
+  },
+};
+const TEMPLATE_LIST = [
+  { key: 'grid',       name: 'Миллиметровка', icon: '▦' },
+  { key: 'music',      name: 'Нотный стан',   icon: '♪' },
+  { key: 'cat',        name: 'Раскраска: кот', icon: '🐱' },
+  { key: 'storyboard', name: 'Раскадровка',   icon: '🎬' },
+  { key: 'sudoku',     name: 'Судоку-сетка',  icon: '#' },
+];
+function setupTemplates() {
+  const grid = $('#tpl-grid');
+  const modal = $('#tpl-modal');
+  if (!grid || !modal) return;
+  grid.innerHTML = '';
+  for (const t of TEMPLATE_LIST) {
+    const el = document.createElement('div');
+    el.className = 'tpl-item';
+    el.innerHTML = `<div class="tpl-preview">${t.icon}</div><div class="tpl-name">${t.name}</div>`;
+    el.addEventListener('click', () => {
+      const strokes = (TEMPLATES[t.key] || (() => []))();
+      if (!strokes.length) return;
+      state.ydoc.transact(() => {
+        state.yStrokes.push(strokes);
+      }, 'template');
+      fitView(); redrawMain();
+      modal.classList.remove('show');
+      showToast(`Шаблон «${t.name}» добавлен`, 'success', 1600);
+    });
+    grid.appendChild(el);
+  }
+  $('#tpl-close').addEventListener('click', () => modal.classList.remove('show'));
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('show'); });
+  $('#btn-templates').addEventListener('click', () => modal.classList.add('show'));
+}
+
+// ============ Экспорт PDF (jsPDF, клиентский) ============
+async function downloadPDF() {
+  const bb = strokesBBox();
+  if (!state.yStrokes || state.yStrokes.length === 0) { showToast('Пусто — нечего выгружать', '', 1600); return; }
+  showToast('Готовлю PDF…', '', 1200);
+  const scale = 2;
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(bb.w * scale));
+  out.height = Math.max(1, Math.round(bb.h * scale));
+  const octx = out.getContext('2d');
+  octx.fillStyle = '#11161f'; octx.fillRect(0, 0, out.width, out.height);
+  octx.setTransform(scale, 0, 0, scale, -bb.x * scale, -bb.y * scale);
+  const arr = (state.yStrokes.toArray() || []).slice().sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
+  for (const s of arr) drawStroke(octx, s);
+  try {
+    const { jsPDF } = await import('https://esm.sh/jspdf@2.5.2');
+    const orient = bb.w >= bb.h ? 'l' : 'p';
+    const pdf = new jsPDF({ orientation: orient, unit: 'pt', format: [Math.round(bb.w), Math.round(bb.h)] });
+    pdf.addImage(out.toDataURL('image/png'), 'PNG', 0, 0, Math.round(bb.w), Math.round(bb.h));
+    pdf.save(`catscribbles-${state.roomCode}-${Date.now()}.pdf`);
+    showToast('PDF скачан', 'success', 1400);
+  } catch (e) {
+    console.warn('PDF export failed', e);
+    showToast('PDF недоступен — нет сети?', 'error', 1800);
+  }
 }
 
 // ============ Debug-бар: диагностика Realtime sync + presence ============
@@ -1840,6 +2034,8 @@ function updateDebugBar() {
 
 // ============ Старт ============
 window.__csReady = true;
+// Экспонируем ключевые функции для тестов/отладки (безопасно — без секретов).
+window.__csf = { drawGrid, strokesBBox, genRoomCode, downloadPDF, downloadPNG, fitView, applyTemplate: (k) => { const f = TEMPLATES[k]; if (f) state.ydoc.transact(() => state.yStrokes.push(f())); } };
 (function bootReady(){
   ['btn-create', 'btn-join'].forEach(function(id){
     var b = document.getElementById(id);
