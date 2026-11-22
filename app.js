@@ -305,6 +305,10 @@ async function openShareModal() {
       : 'Покажите код или QR второму человеку. На телефоне QR удобно сканировать камерой.';
   }
   shareModal.classList.add('show');
+  // В Telegram — дополнительная кнопка шеринга в чат.
+  const old = document.getElementById('tg-share-row'); if (old) old.remove();
+  const tgBtn = tgShareButton(link);
+  if (tgBtn) { const row = document.createElement('div'); row.id = 'tg-share-row'; row.appendChild(tgBtn); shareModal.querySelector('.modal').appendChild(row); }
 }
 function closeShareModal() { shareModal.classList.remove('show'); }
 
@@ -560,6 +564,9 @@ async function enterRoom(code) {
   setupToolbar();
   setupInstall();
   setupTemplates();
+  setupAI();
+  setupTelegram();
+  setupStickyEdit();
   setupTopbar();
   updateModeUI();
   updateConnStatus();
@@ -1227,6 +1234,21 @@ function onPointerDown(e) {
     spawnTextInput(x, y);
     return;
   }
+  if (state.tool === 'sticky') {
+    const hitId = stickyHit(x, y);
+    if (hitId) {                                   // тянем существующую заметку
+      const s = allStickies().find(st => st.id === hitId);
+      const [sx, sy] = s.points[0];
+      state._stickyDrag = { id: hitId, offX: x - sx, offY: y - sy, cur: [sx, sy] };
+      state._selSticky = hitId;
+      try { stage.setPointerCapture(e.pointerId); } catch(_) {}
+      redrawMain();
+    } else {                                       // новая заметка
+      state._selSticky = null; redrawMain();
+      spawnStickyInput(x, y);
+    }
+    return;
+  }
 
   state.isDrawing = true;
   state.redoStack = [];
@@ -1260,6 +1282,12 @@ function onPointerMove(e) {
     redrawMain(); redrawOverlay();
     return;
   }
+  if (state._stickyDrag) {
+    const [x, y] = pointerCoord(e);
+    state._stickyDrag.cur = [x - state._stickyDrag.offX, y - state._stickyDrag.offY];
+    redrawMain();
+    return;
+  }
   const [x, y] = pointerCoord(e);
   state._cursor = [x, y];
   if (state.isDrawing && state.currentStroke) {
@@ -1287,6 +1315,13 @@ function onPointerUp(e) {
   if (pan) {
     try { stage.releasePointerCapture(e.pointerId); } catch(_) {}
     pan = null;
+    return;
+  }
+  if (state._stickyDrag) {
+    try { stage.releasePointerCapture(e.pointerId); } catch(_) {}
+    const d = state._stickyDrag; state._stickyDrag = null;
+    commitStickyUpdate(d.id, { points: [d.cur] });
+    redrawMain();
     return;
   }
   if (pinch && pointers.size < 2) { pinch = null; }
@@ -1360,6 +1395,72 @@ function spawnTextInput(x, y) {
     if (e.key === 'Escape') input.remove();
   });
   input.addEventListener('blur', commit);
+}
+
+// ============ Липкие заметки: ввод текста ============
+function spawnStickyInput(x, y, existing) {
+  const old = stage.querySelector('.sticky-input');
+  if (old) old.remove();
+  const ta = document.createElement('textarea');
+  ta.className = 'sticky-input';
+  ta.placeholder = 'Заметка…';
+  ta.setAttribute('autocomplete', 'off');
+  const [sx, sy] = logicalToScreen(x, y);
+  const w = STICKY_W * view.scale, h = STICKY_H * view.scale;
+  const bg = existing ? existing.color : stickyColor(allStickies().length);
+  ta.style.left = sx + 'px'; ta.style.top = sy + 'px';
+  ta.style.width = w + 'px'; ta.style.height = h + 'px';
+  ta.style.fontSize = Math.max(13, 15 * view.scale) + 'px';
+  ta.style.background = bg; ta.style.color = '#1a1f2b';
+  ta.style.transformOrigin = 'top left';
+  stage.appendChild(ta);
+  if (existing && existing.text) ta.value = existing.text;
+  try { ta.focus({ preventScroll: true }); } catch (_) { ta.focus(); }
+
+  let committed = false;
+  const commit = () => {
+    if (committed) return; committed = true;
+    const text = ta.value.trim();
+    ta.onblur = null; ta.remove();
+    if (existing) {
+      if (text) commitStickyUpdate(existing.id, { text });
+      else deleteSticky(existing.id);              // пустая заметка при редакте → удалить
+    } else if (text) {
+      const stroke = {
+        id: uuid(), tool: 'sticky', color: bg, size: 5, layer: state.layer,
+        author: state.userId, authorColor: state.userColor,
+        points: [[x, y]], text, w: STICKY_W, h: STICKY_H, ts: Date.now(),
+      };
+      state.yStrokes.push([stroke]);
+      state.undoStack.push(stroke.id);
+      updateUndoRedoUI();
+    }
+    redrawMain();
+  };
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { committed = true; ta.remove(); }
+  });
+  ta.addEventListener('blur', commit);
+}
+// Двойной тап/клик по заметке → редактировать текст.
+function setupStickyEdit() {
+  stage.addEventListener('dblclick', e => {
+    const [x, y] = pointerCoord(e);
+    const id = stickyHit(x, y);
+    if (!id) return;
+    const s = allStickies().find(st => st.id === id);
+    if (s) spawnStickyInput(s.points[0][0], s.points[0][1], s);
+  });
+  // Delete/Backspace удаляет выбранную заметку (не в текстовом поле).
+  document.addEventListener('keydown', e => {
+    if (state._selSticky && (e.key === 'Delete' || e.key === 'Backspace')) {
+      const tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      e.preventDefault();
+      deleteSticky(state._selSticky);
+    }
+  });
 }
 
 // ============ Отрисовка ============
@@ -1540,6 +1641,94 @@ function shapeEllipse(ctx, s) {
   ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2); ctx.stroke();
 }
 
+// ============ Липкие заметки (sticky notes) ============
+const STICKY_W = 190, STICKY_H = 130, STICKY_PAD = 10;
+const STICKY_COLORS = ['#ffe27a', '#ffd0e0', '#b6f5c0', '#bcd9ff', '#f0c9ff', '#ffd9a8'];
+function stickyColor(i) { return STICKY_COLORS[i % STICKY_COLORS.length]; }
+function allStickies() {
+  return (state.yStrokes ? state.yStrokes.toArray() : []).filter(s => s.tool === 'sticky');
+}
+function findStickyIndex(id) {
+  if (!state.yStrokes) return -1;
+  for (let i = 0; i < state.yStrokes.length; i++) if (state.yStrokes.get(i).id === id) return i;
+  return -1;
+}
+// Попадание точки в sticky (топ-последний выигрывает). Возвращает id или null.
+function stickyHit(x, y) {
+  const arr = allStickies();
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const s = arr[i], [sx, sy] = s.points[0];
+    const w = s.w || STICKY_W, h = s.h || STICKY_H;
+    if (x >= sx && x <= sx + w && y >= sy && y <= sy + h) return s.id;
+  }
+  return null;
+}
+function wrapText(ctx, text, maxW) {
+  const words = (text || '').split(/\s+/);
+  const lines = []; let line = '';
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+function drawSticky(ctx, s) {
+  const [x0, y0] = s.points[0];
+  const drag = state._stickyDrag && state._stickyDrag.id === s.id ? state._stickyDrag.cur : null;
+  const x = drag ? drag[0] : x0, y = drag ? drag[1] : y0;
+  const w = s.w || STICKY_W, h = s.h || STICKY_H;
+  const bg = s.color || STICKY_COLORS[0];
+  ctx.save();
+  // мягкая тень
+  ctx.shadowColor = 'rgba(0,0,0,.35)'; ctx.shadowBlur = 12 / view.scale; ctx.shadowOffsetY = 4 / view.scale;
+  ctx.fillStyle = bg;
+  roundRect(ctx, x, y, w, h, 6 / view.scale + 4); ctx.fill();
+  ctx.shadowColor = 'transparent';
+  // загнутый уголок
+  ctx.fillStyle = 'rgba(0,0,0,.10)';
+  ctx.beginPath(); ctx.moveTo(x + w, y); ctx.lineTo(x + w - 14, y); ctx.lineTo(x + w, y + 14); ctx.closePath(); ctx.fill();
+  // текст
+  const fs = 15;
+  ctx.fillStyle = '#1a1f2b'; ctx.font = `600 ${fs}px Inter, system-ui, sans-serif`; ctx.textBaseline = 'top';
+  ctx.beginPath(); roundRect(ctx, x + STICKY_PAD, y + STICKY_PAD, w - STICKY_PAD * 2, h - STICKY_PAD * 2, 3); ctx.clip();
+  const lines = wrapText(ctx, s.text || '', w - STICKY_PAD * 2);
+  let ty = y + STICKY_PAD;
+  for (const ln of lines) { ctx.fillText(ln, x + STICKY_PAD, ty); ty += fs + 3; if (ty > y + h - STICKY_PAD) break; }
+  // выделение (выбрано для перемещения)
+  if (state._selSticky === s.id) {
+    ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 2 / view.scale;
+    roundRect(ctx, x - 2, y - 2, w + 4, h + 4, 8); ctx.stroke();
+  }
+  ctx.restore();
+}
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+// Применить перемещение/текст к существующей заметке (delete+insert в yStrokes).
+function commitStickyUpdate(id, patch) {
+  const i = findStickyIndex(id);
+  if (i < 0) return;
+  const s = state.yStrokes.get(i);
+  const upd = Object.assign({}, s, patch);
+  state.ydoc.transact(() => {
+    state.yStrokes.delete(i, 1);
+    state.yStrokes.insert(i, [upd]);
+  }, 'sticky-edit');
+}
+function deleteSticky(id) {
+  const i = findStickyIndex(id);
+  if (i < 0) return;
+  state.yStrokes.delete(i, 1);
+  if (state._selSticky === id) state._selSticky = null;
+  redrawMain();
+}
+
 function drawStroke(ctx, s, overrideColor) {
   if (!s || !s.points || s.points.length === 0) return;
   ctx.save();
@@ -1556,6 +1745,8 @@ function drawStroke(ctx, s, overrideColor) {
     ctx.fillStyle = color; ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
     ctx.textBaseline = 'middle';
     ctx.fillText(s.text, s.points[0][0], s.points[0][1]);
+  } else if (s.tool === 'sticky') {
+    drawSticky(ctx, s);
   } else {
     switch (s.tool) {
       case 'pen': brushPen(ctx, st); break;
@@ -1659,6 +1850,7 @@ const BRUSH_INFO = {
 };
 function selectTool(tool) {
   state.tool = tool;
+  if (state._selSticky) { state._selSticky = null; redrawMain(); }
   // быстрое переключение для кистей/фигур
   $$('.tool-btn[data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
   $$('.palette-item').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
@@ -2000,6 +2192,126 @@ async function downloadPDF() {
   }
 }
 
+// ============ Telegram Mini App ============
+// Приложение работает как Telegram WebApp: SDK грузится в index.html (no-op вне TG).
+function tgWebApp() { return (window.Telegram && window.Telegram.WebApp) || null; }
+function isTelegram() { return !!tgWebApp(); }
+function setupTelegram() {
+  const tg = tgWebApp(); if (!tg) return;
+  tg.ready(); tg.expand();
+  // тема TG → CSS-переменные (тёмная/светлая + акцент)
+  const tp = tg.themeParams || {};
+  const root = document.documentElement;
+  if (tg.colorScheme === 'light') root.classList.add('tg-light');
+  if (tp.bg_color) root.style.setProperty('--bg-1', '#' + tp.bg_color);
+  if (tp.text_color) root.style.setProperty('--text', '#' + tp.text_color);
+  if (tp.hint_color) root.style.setProperty('--text-mute', '#' + tp.hint_color);
+  if (tp.button_color) root.style.setProperty('--bg-2', '#' + tp.button_color);
+  if (tp.accent_text_color || tp.button_text_color) root.style.setProperty('--cyan', '#' + (tp.accent_text_color || tp.button_text_color));
+  tg.setBackgroundColor?.(tp.bg_color || '#0a0d12');
+  // авто-ник из профиля Telegram
+  const u = tg.initDataUnsafe && tg.initDataUnsafe.user;
+  if (u && u.first_name) {
+    state._tgNick = (u.first_name + (u.last_name ? ' ' + u.last_name[0] + '.' : '')).slice(0, 18);
+    const cn = $('#create-nick'), jn = $('#join-nick');
+    [cn, jn].forEach(el => { if (el && !el.value) { el.value = state._tgNick; el.dispatchEvent(new Event('input', { bubbles: true })); } });
+  }
+  // BackButton: в комнате — выйти; на старте — закрыть WebApp
+  const bb = tg.BackButton;
+  const syncBack = () => {
+    const inRoom = /#room=/.test(location.hash);
+    if (inRoom) { bb.show(); } else { bb.hide(); }
+  };
+  bb.onClick(() => {
+    if (/#room=/.test(location.hash)) { leaveRoom(); }
+    else { tg.close(); }
+  });
+  window.addEventListener('hashchange', syncBack);
+  syncBack();
+}
+// Кнопка «Поделиться в Telegram» в share-модалке (появляется только внутри TG).
+function tgShareButton(link) {
+  const tg = tgWebApp(); if (!tg) return null;
+  const btn = document.createElement('button');
+  btn.className = 'btn btn-primary';
+  btn.style.cssText = 'width:100%;margin-top:10px';
+  btn.textContent = '📤 Поделиться в Telegram';
+  btn.addEventListener('click', () => {
+    const url = 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent('Рисуем вместе в CatScribbles 🐱');
+    tg.openTelegramLink(url);
+  });
+  return btn;
+}
+
+// ============ AI «дорисуй скетч» (через Supabase Edge Function) ============
+const AI_FN_URL = `${SB_URL.replace(/\/$/, '')}/functions/v1/ai-enhance`;
+// Снимок холста по bbox штрихов, JPEG, длинная сторона ≤ 1024 (компактный payload).
+function canvasSnapshot() {
+  const bb = strokesBBox();
+  if (!state.yStrokes || state.yStrokes.length === 0) return null;
+  const maxSide = 1024;
+  const scale = Math.min(2, maxSide / Math.max(bb.w, bb.h));
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(bb.w * scale));
+  out.height = Math.max(1, Math.round(bb.h * scale));
+  const octx = out.getContext('2d');
+  octx.fillStyle = '#11161f'; octx.fillRect(0, 0, out.width, out.height);
+  octx.setTransform(scale, 0, 0, scale, -bb.x * scale, -bb.y * scale);
+  const arr = (state.yStrokes.toArray() || []).slice().sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
+  for (const s of arr) drawStroke(octx, s);
+  return out.toDataURL('image/jpeg', 0.88);
+}
+function setupAI() {
+  const modal = $('#ai-modal'); if (!modal) return;
+  const go = () => aiEnhance();
+  $('#btn-ai').addEventListener('click', () => {
+    $('#ai-result').style.display = 'none';
+    $('#ai-status').textContent = '';
+    modal.classList.add('show');
+  });
+  $('#ai-close').addEventListener('click', () => modal.classList.remove('show'));
+  $('#ai-go').addEventListener('click', go);
+  $('#ai-redo').addEventListener('click', go);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('show'); });
+  $('#ai-download').addEventListener('click', () => {
+    const img = $('#ai-result-img'); if (!img || !img.src) return;
+    const a = document.createElement('a');
+    a.download = `catscribbles-ai-${state.roomCode}-${Date.now()}.png`;
+    a.href = img.src; a.click();
+  });
+}
+async function aiEnhance() {
+  if (!state.yStrokes || state.yStrokes.length === 0) { $('#ai-status').textContent = 'Холст пуст — сначала нарисуйте'; return; }
+  const snap = canvasSnapshot();
+  if (!snap) { $('#ai-status').textContent = 'Не удалось сделать снимок'; return; }
+  const prompt = ($('#ai-prompt').value || '').trim() || 'Превратить скетч в законченный цифровой арт';
+  const status = $('#ai-status'), result = $('#ai-result'), btn = $('#ai-go');
+  result.style.display = 'none';
+  status.textContent = 'Рисую… (10–20 сек)'; status.style.color = 'var(--cyan)';
+  btn.disabled = true;
+  try {
+    const r = await fetch(AI_FN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SB_KEY}` },
+      body: JSON.stringify({ image: snap, prompt, size: '1024x1024' }),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      throw new Error(r.status === 404 ? 'функция не развёрнута (404)' : `${r.status} ${t.slice(0, 120)}`);
+    }
+    const data = await r.json();
+    if (!data.image) throw new Error(data.error || 'нет изображения в ответе');
+    $('#ai-result-img').src = data.image;
+    result.style.display = 'block';
+    status.textContent = 'Готово ✨'; status.style.color = 'var(--text-mute)';
+  } catch (e) {
+    status.textContent = 'AI недоступен: ' + (e.message || e) + ' — см. инструкции по развёртыванию функции';
+    status.style.color = 'var(--danger, #ff5c7c)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ============ Debug-бар: диагностика Realtime sync + presence ============
 function startDebugBar() {
   if (state._dbgTimer) clearInterval(state._dbgTimer);
@@ -2035,7 +2347,7 @@ function updateDebugBar() {
 // ============ Старт ============
 window.__csReady = true;
 // Экспонируем ключевые функции для тестов/отладки (безопасно — без секретов).
-window.__csf = { drawGrid, strokesBBox, genRoomCode, downloadPDF, downloadPNG, fitView, applyTemplate: (k) => { const f = TEMPLATES[k]; if (f) state.ydoc.transact(() => state.yStrokes.push(f())); } };
+window.__csf = { drawGrid, strokesBBox, genRoomCode, downloadPDF, downloadPNG, selectTool, stickyHit, allStickies, logicalToScreen, pointerCoord, applyTemplate: (k) => { const f = TEMPLATES[k]; if (f) state.ydoc.transact(() => state.yStrokes.push(f())); } };
 (function bootReady(){
   ['btn-create', 'btn-join'].forEach(function(id){
     var b = document.getElementById(id);
