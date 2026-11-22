@@ -1,7 +1,7 @@
 // CatScribbles service worker — офлайн-оболочка + stale-while-revalidate.
 // Данные (Supabase Realtime/REST, WebRTC) всегда идут в сеть; кэшируется только
 // оболочка (index.html, app.js) и статика (иконки, модули esm.sh после первой загрузки).
-const CACHE = 'catscribbles-v3';
+const CACHE = 'catscribbles-v4';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
