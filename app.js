@@ -163,20 +163,36 @@ $$('.tabs button').forEach(btn => {
 });
 
 // ============ Лендинг: создать / войти ============
+const NICK_KEY = 'cs_nick';
+// Принять и код (CS-XXXX), и полную ссылку (https://.../#room=CS-XXXX) — извлечь код.
+function parseRoomCode(raw) {
+  if (!raw) return '';
+  let s = raw.trim();
+  const m = s.match(/room=([A-Z0-9-]+)/i) || s.match(/(CS[-]?[A-Z0-9]{4,8})/i);
+  if (m) s = m[1];
+  s = s.toUpperCase().replace(/\s+/g, '');
+  if (!s.startsWith(ROOM_PREFIX)) s = ROOM_PREFIX + s.replace(ROOM_PREFIX, '');
+  return s;
+}
+function saveNick(n) { try { if (n) localStorage.setItem(NICK_KEY, n.slice(0, 20)); } catch (_) {} }
+function loadNick() { try { return localStorage.getItem(NICK_KEY) || ''; } catch (_) { return ''; } }
+
 $('#btn-create').addEventListener('click', () => {
   const nick = $('#create-nick').value.trim();
-  state.nick = nick;
+  state.nick = nick; saveNick(nick);
   const code = genRoomCode();
   state.isHost = true;
   enterRoom(code);
+  // Сразу показываем ссылку+QR — хосту надо только отправить её другу.
+  setTimeout(openShareModal, 500);
 });
 
 $('#btn-join').addEventListener('click', () => {
-  let code = $('#join-code').value.trim().toUpperCase();
+  const code = parseRoomCode($('#join-code').value);
   const nick = $('#join-nick').value.trim();
-  state.nick = nick;
-  if (!code) { showToast('Введите код комнаты', 'error'); $('#join-code').focus(); return; }
-  if (!code.startsWith(ROOM_PREFIX)) code = ROOM_PREFIX + code.replace(ROOM_PREFIX, '');
+  state.nick = nick; saveNick(nick);
+  $('#join-code').value = code;
+  if (!code) { showToast('Введите код комнаты или ссылку', 'error'); $('#join-code').focus(); return; }
   enterRoom(code);
 });
 
@@ -186,6 +202,11 @@ $('#join-code').addEventListener('input', e => {
 $('#join-code').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btn-join').click(); });
 $('#create-nick').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btn-create').click(); });
 $('#join-nick').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btn-join').click(); });
+// Предзаполнение ника из предыдущего визита.
+(function prefillNick() {
+  const n = loadNick();
+  if (n) { $('#create-nick').value = n; $('#join-nick').value = n; }
+})();
 
 // Автовход по URL hash (#room=CS-XXXXXX)
 (function autoJoinFromHash() {
@@ -289,6 +310,14 @@ function closeShareModal() { shareModal.classList.remove('show'); }
 
 $('#share-close').addEventListener('click', closeShareModal);
 shareModal.addEventListener('click', e => { if (e.target === shareModal) closeShareModal(); });
+// Нативный шеринг (мобильные): одной кнопкой отправить ссылку в WhatsApp/Telegram/SMS.
+const nativeShareBtn = $('#btn-native-share');
+if (nativeShareBtn && navigator.share) nativeShareBtn.hidden = false;
+if (nativeShareBtn) nativeShareBtn.addEventListener('click', async () => {
+  const link = buildRoomLink();
+  try { await navigator.share({ title: 'CatScribbles', text: 'Нарисуй мне ответ ✏️', url: link }); }
+  catch (_) {}
+});
 
 $$('[data-copy]').forEach(btn => {
   btn.addEventListener('click', async () => {
@@ -529,6 +558,7 @@ async function enterRoom(code) {
   window.addEventListener('beforeunload', flushPersistOnExit, { once: false });
   buildSwatches();
   setupToolbar();
+  setupInstall();
   setupTopbar();
   updateModeUI();
   updateConnStatus();
@@ -1125,6 +1155,8 @@ function onPointerDown(e) {
 
   state.isDrawing = true;
   state.redoStack = [];
+  // Фигуры хранят [start, end]; кисти — массив точек пути.
+  const pts = SHAPES.has(state.tool) ? [[x, y], [x, y]] : [[x, y]];
   state.currentStroke = {
     id: uuid(),
     tool: state.tool,
@@ -1133,7 +1165,7 @@ function onPointerDown(e) {
     layer: state.layer,
     author: state.userId,
     authorColor: state.userColor,
-    points: [[x, y]],
+    points: pts,
     ts: Date.now(),
   };
   try { stage.setPointerCapture(e.pointerId); } catch(_) {}
@@ -1156,12 +1188,19 @@ function onPointerMove(e) {
   const [x, y] = pointerCoord(e);
   state._cursor = [x, y];
   if (state.isDrawing && state.currentStroke) {
-    const pts = state.currentStroke.points;
-    const last = pts[pts.length - 1];
-    if (Math.hypot(x - last[0], y - last[1]) > 1.2 / view.scale) {
-      pts.push([x, y]);
+    const cs = state.currentStroke;
+    if (SHAPES.has(cs.tool)) {
+      cs.points[1] = [x, y];                 // фигура: тянем второй угол
       pushCursorAwareness();
       redrawOverlay();
+    } else {
+      const pts = cs.points;
+      const last = pts[pts.length - 1];
+      if (Math.hypot(x - last[0], y - last[1]) > 1.2 / view.scale) {
+        pts.push([x, y]);
+        pushCursorAwareness();
+        redrawOverlay();
+      }
     }
   } else {
     pushCursorAwareness();
@@ -1285,43 +1324,176 @@ function redrawOverlay() {
   }
 }
 
+// ============ Кисти и фигуры ============
+// Все кисти детерминированы точками штриха → на любом устройстве рисуются одинаково
+// (важно для sync). Скорость/плотность выводятся из расстояния между точками.
+const SHAPES = new Set(['line', 'rect', 'ellipse']);
+const BRUSHES = ['pen', 'pencil', 'marker', 'watercolor', 'spray', 'scratch', 'neon'];
+
+function hexA(hex, a) {
+  const c = (hex || '#000').replace('#', '');
+  const r = parseInt(c.substr(0, 2), 16) || 0;
+  const g = parseInt(c.substr(2, 2), 16) || 0;
+  const b = parseInt(c.substr(4, 2), 16) || 0;
+  return `rgba(${r},${g},${b},${a})`;
+}
+// Детерминированный PRNG (одинаково на всех устройствах → синхронный спрей/царапины).
+function makeRng(seed) { let s = (seed | 0) || 1; return () => { s = (s * 1664525 + 1013904223) | 0; return ((s >>> 0) % 100000) / 100000; }; }
+function seedFrom(pts) { let h = 2166136261 >>> 0; for (const p of pts) { h = Math.imul(h ^ Math.round(p[0] * 10), 16777619); h = Math.imul(h ^ Math.round(p[1] * 10), 16777619); } return h >>> 0; }
+// Сглаженный путь (квадратичные кривые по серединам) — для pen/pencil/marker/watercolor/neon.
+function strokePath(ctx, pts) {
+  if (!pts || pts.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [x, y] = pts[i], [nx, ny] = pts[i + 1];
+    ctx.quadraticCurveTo(x, y, (x + nx) / 2, (y + ny) / 2);
+  }
+  const last = pts[pts.length - 1];
+  ctx.lineTo(last[0], last[1]);
+  ctx.stroke();
+}
+
+function brushPen(ctx, s) {
+  ctx.strokeStyle = s.color; ctx.lineWidth = s.size; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  strokePath(ctx, s.points);
+}
+// Карандаш: полупрозрачная линия + зернистая текстура вокруг пути.
+function brushPencil(ctx, s) {
+  const rng = makeRng(seedFrom(s.points));
+  ctx.strokeStyle = hexA(s.color, 0.55); ctx.lineWidth = Math.max(0.6, s.size * 0.8);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  strokePath(ctx, s.points);
+  ctx.fillStyle = hexA(s.color, 0.28);
+  for (let i = 0; i < s.points.length; i++) {
+    const [x, y] = s.points[i];
+    const n = Math.ceil(s.size * 0.6);
+    for (let k = 0; k < n; k++) {
+      const a = rng() * Math.PI * 2, r = rng() * s.size * 0.55;
+      ctx.fillRect(x + Math.cos(a) * r, y + Math.sin(a) * r, 0.7, 0.7);
+    }
+  }
+}
+// Маркер/текстовыделитель: плоский полупрозрачный широкий штрих.
+function brushMarker(ctx, s) {
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = s.color; ctx.lineWidth = s.size * 1.7;
+  ctx.lineCap = 'square'; ctx.lineJoin = 'round';
+  strokePath(ctx, s.points);
+  ctx.globalAlpha = 1;
+}
+// Акварель: мягкие слои (широкий прозрачный → узкий насыщенный) + лёгкое размытие края.
+function brushWatercolor(ctx, s) {
+  ctx.strokeStyle = s.color; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.shadowColor = hexA(s.color, 0.5); ctx.shadowBlur = s.size * 0.8;
+  const layers = [[s.size * 2.1, 0.05], [s.size * 1.5, 0.09], [s.size * 1.0, 0.14], [s.size * 0.55, 0.22]];
+  for (const [w, a] of layers) { ctx.globalAlpha = a; ctx.lineWidth = w; strokePath(ctx, s.points); }
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+}
+// Баллончик: распыление частиц вдоль пути. Плотность = чаще сэмплы где ведёшь медленно.
+function brushSpray(ctx, s) {
+  const rng = makeRng(seedFrom(s.points));
+  const R = Math.max(2, s.size * 1.4);
+  ctx.fillStyle = hexA(s.color, 0.45);
+  const pts = s.points;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+    const seg = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.max(1, Math.floor(seg / (R * 0.28)));
+    for (let t = 0; t < steps; t++) {
+      const cx = x0 + (x1 - x0) * (t / steps), cy = y0 + (y1 - y0) * (t / steps);
+      const dots = Math.ceil(R * 1.1);
+      for (let k = 0; k < dots; k++) {
+        const a = rng() * Math.PI * 2, r = Math.sqrt(rng()) * R;
+        ctx.beginPath();
+        ctx.arc(cx + Math.cos(a) * r, cy + Math.sin(a) * r, Math.max(0.4, rng() * 0.9 + 0.3), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+// Царапины: длинные сегменты (быстрое движение) → короткие рваные штрихи поперёк движения.
+function brushScratch(ctx, s) {
+  const rng = makeRng(seedFrom(s.points));
+  const pts = s.points;
+  ctx.strokeStyle = hexA(s.color, 0.85); ctx.lineWidth = Math.max(0.6, s.size * 0.5); ctx.lineCap = 'round';
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+    const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+    if (len < 1.5) continue;
+    const nx = -dy / len, ny = dx / len;             // нормаль к направлению
+    const scratches = Math.max(1, Math.floor(len / Math.max(2, s.size * 0.6)));
+    for (let k = 0; k < scratches; k++) {
+      const f = (k + 0.5) / scratches;
+      const cx = x0 + dx * f, cy = y0 + dy * f;
+      const half = rng() * s.size * 0.7 + s.size * 0.2;
+      const off = (rng() - 0.5) * s.size * 0.4;
+      const dir = rng() > 0.5 ? 1 : -1;
+      ctx.beginPath();
+      ctx.moveTo(cx + nx * off, cy + ny * off);
+      ctx.lineTo(cx + nx * (off + dir * half), cy + ny * (off + dir * half));
+      ctx.stroke();
+    }
+  }
+}
+// Неон: светящаяся обводка (shadowBlur) + яркое ядро.
+function brushNeon(ctx, s) {
+  ctx.shadowColor = s.color; ctx.shadowBlur = s.size * 2.4;
+  ctx.strokeStyle = s.color; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.globalAlpha = 0.55; ctx.lineWidth = s.size * 1.5; strokePath(ctx, s.points);
+  ctx.globalAlpha = 1; ctx.lineWidth = Math.max(0.8, s.size * 0.5); ctx.strokeStyle = '#ffffff';
+  strokePath(ctx, s.points);
+  ctx.shadowBlur = 0;
+}
+// Фигуры: points = [start, end].
+function shapeLine(ctx, s) {
+  const [a, b] = s.points;
+  ctx.strokeStyle = s.color; ctx.lineWidth = s.size; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+}
+function shapeRect(ctx, s) {
+  const [a, b] = s.points;
+  ctx.strokeStyle = s.color; ctx.lineWidth = s.size; ctx.lineJoin = 'round';
+  ctx.strokeRect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+}
+function shapeEllipse(ctx, s) {
+  const [a, b] = s.points;
+  const cx = (a[0] + b[0]) / 2, cy = (a[1] + b[1]) / 2;
+  const rx = Math.max(0.5, Math.abs(b[0] - a[0]) / 2), ry = Math.max(0.5, Math.abs(b[1] - a[1]) / 2);
+  ctx.strokeStyle = s.color; ctx.lineWidth = s.size;
+  ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2); ctx.stroke();
+}
+
 function drawStroke(ctx, s, overrideColor) {
-  if (!s || !s.points) return;
+  if (!s || !s.points || s.points.length === 0) return;
   ctx.save();
+  const color = overrideColor || s.color;
+  const st = overrideColor ? Object.assign({}, s, { color }) : s;
   if (s.tool === 'eraser') {
     ctx.globalCompositeOperation = 'destination-out';
-    ctx.strokeStyle = 'rgba(0,0,0,1)';
-    ctx.fillStyle = 'rgba(0,0,0,1)';
-  } else {
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.strokeStyle = overrideColor || s.color;
-    ctx.fillStyle = overrideColor || s.color;
-  }
-  ctx.lineWidth = s.size;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-
-  if (s.tool === 'text' && s.text) {
+    ctx.strokeStyle = 'rgba(0,0,0,1)'; ctx.fillStyle = 'rgba(0,0,0,1)';
+    ctx.lineWidth = s.size; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    strokePath(ctx, s.points);
+    if (s.points.length === 1) { ctx.beginPath(); ctx.arc(s.points[0][0], s.points[0][1], Math.max(0.5, s.size / 2), 0, Math.PI * 2); ctx.fill(); }
+  } else if (s.tool === 'text' && s.text) {
     const fontSize = clamp(s.size * 3, 14, 72);
-    ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+    ctx.fillStyle = color; ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
     ctx.textBaseline = 'middle';
     ctx.fillText(s.text, s.points[0][0], s.points[0][1]);
-  } else if (s.points.length > 1) {
-    ctx.beginPath();
-    ctx.moveTo(s.points[0][0], s.points[0][1]);
-    for (let i = 1; i < s.points.length - 1; i++) {
-      const [x, y] = s.points[i];
-      const [nx, ny] = s.points[i + 1];
-      const mx = (x + nx) / 2, my = (y + ny) / 2;
-      ctx.quadraticCurveTo(x, y, mx, my);
+  } else {
+    switch (s.tool) {
+      case 'pen': brushPen(ctx, st); break;
+      case 'pencil': brushPencil(ctx, st); break;
+      case 'marker': brushMarker(ctx, st); break;
+      case 'watercolor': brushWatercolor(ctx, st); break;
+      case 'spray': brushSpray(ctx, st); break;
+      case 'scratch': brushScratch(ctx, st); break;
+      case 'neon': brushNeon(ctx, st); break;
+      case 'line': shapeLine(ctx, st); break;
+      case 'rect': shapeRect(ctx, st); break;
+      case 'ellipse': shapeEllipse(ctx, st); break;
+      default: brushPen(ctx, st);
     }
-    const last = s.points[s.points.length - 1];
-    ctx.lineTo(last[0], last[1]);
-    ctx.stroke();
-  } else if (s.points.length === 1) {
-    ctx.beginPath();
-    ctx.arc(s.points[0][0], s.points[0][1], Math.max(0.5, s.size / 2), 0, Math.PI * 2);
-    ctx.fill();
   }
   ctx.restore();
 }
@@ -1352,15 +1524,103 @@ function drawCursor(ctx, x, y, color, nick, drawing) {
   ctx.restore();
 }
 
-// ============ Тулбар ============
-function setupToolbar() {
-  $$('.tool-btn[data-tool]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      $$('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      state.tool = btn.dataset.tool;
+// ============ Установка PWA на главный экран ============
+function setupInstall() {
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  const modal = $('#install-modal');
+  const steps = $('#install-steps');
+  const btnIos = $('#btn-install-ios');
+  const btnOther = $('#btn-install-other');
+  if (!modal || isStandalone) return;
+  let deferredPrompt = null;
+
+  const renderSteps = kind => {
+    if (kind === 'ios') {
+      steps.innerHTML =
+        '<div class="step"><span class="n">1</span><span class="t">Откройте эту страницу в <b>Safari</b> — установка работает только из Safari, не из Chrome.</span></div>' +
+        '<div class="step"><span class="n">2</span><span class="t">Нажмите <b>«Поделиться»</b> внизу — квадрат со стрелкой вверх ▭↗.</span></div>' +
+        '<div class="step"><span class="n">3</span><span class="t">Прокрутите вниз и выберите <b>«На экран Домой»</b> (Add to Home Screen).</span></div>' +
+        '<div class="step"><span class="n">4</span><span class="t">Нажмите <b>«Добавить»</b> — иконка появится на главном экране. Запускайте как обычное приложение, оффлайн-оболочка уже внутри.</span></div>';
+    } else {
+      steps.innerHTML =
+        '<div class="step"><span class="n">1</span><span class="t">Нажмите <b>«Установить приложение»</b> в подсказке браузера или в меню (⋮) → Установить.</span></div>' +
+        '<div class="step"><span class="n">2</span><span class="t">Подтвердите — иконка появится на главном экране.</span></div>';
+    }
+  };
+
+  if (isIOS) {
+    btnIos.hidden = false;
+    btnIos.addEventListener('click', () => { renderSteps('ios'); modal.classList.add('show'); });
+  } else {
+    btnOther.hidden = false;
+    btnOther.addEventListener('click', e => {
+      e.preventDefault();
+      if (deferredPrompt) { deferredPrompt.prompt(); deferredPrompt.userChoice?.catch(() => {}); }
+      else { renderSteps('other'); modal.classList.add('show'); }
     });
+    window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredPrompt = e; });
+  }
+  $('#install-close').addEventListener('click', () => modal.classList.remove('show'));
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('show'); });
+}
+
+// ============ Тулбар ============
+const BRUSH_INFO = {
+  pen:        { name: 'Перо',      icon: '✏️' },
+  pencil:     { name: 'Карандаш',  icon: '✎' },
+  marker:     { name: 'Маркер',    icon: '🖊️' },
+  watercolor: { name: 'Акварель',  icon: '🎨' },
+  spray:      { name: 'Баллончик', icon: '🌫️' },
+  scratch:    { name: 'Царапины',  icon: '✸' },
+  neon:       { name: 'Неон',      icon: '✨' },
+  line:       { name: 'Линия',     icon: '╱' },
+  rect:       { name: 'Прямоуг.',  icon: '▭' },
+  ellipse:    { name: 'Эллипс',    icon: '◯' },
+  eraser:     { name: 'Ластик',    icon: '🧽' },
+  text:       { name: 'Текст',     icon: '🔤' },
+  hand:       { name: 'Рука',      icon: '✋' },
+};
+function selectTool(tool) {
+  state.tool = tool;
+  // быстрое переключение для кистей/фигур
+  $$('.tool-btn[data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  $$('.palette-item').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  const info = BRUSH_INFO[tool];
+  const trig = $('#btn-brushes');
+  if (trig && info) {
+    $('#brush-icon').textContent = info.icon;
+    const nm = $('#brush-name'); if (nm) nm.textContent = info.name;
+    trig.classList.toggle('active', BRUSHES.includes(tool) || SHAPES.has(tool));
+  }
+}
+function setupToolbar() {
+  // Быстрые кнопки: ластик / текст / рука.
+  $$('.tool-btn[data-tool]').forEach(btn => {
+    btn.addEventListener('click', () => selectTool(btn.dataset.tool));
   });
+  // Палитра кистей/фигур.
+  const trig = $('#btn-brushes');
+  const palette = $('#brush-palette');
+  if (trig && palette) {
+    trig.addEventListener('click', e => {
+      e.stopPropagation();
+      const open = palette.classList.toggle('show');
+      trig.classList.toggle('open', open);
+    });
+    $$('.palette-item').forEach(item => {
+      item.addEventListener('click', () => {
+        selectTool(item.dataset.tool);
+        palette.classList.remove('show');
+        trig.classList.remove('open');
+      });
+    });
+    document.addEventListener('click', e => {
+      if (!palette.contains(e.target) && e.target !== trig && !trig.contains(e.target)) {
+        palette.classList.remove('show'); trig.classList.remove('open');
+      }
+    });
+  }
   // Zoom-контрол: Fit (вписать), +/- вокруг центра экрана.
   const zIn = $('#btn-zoom-in'), zOut = $('#btn-zoom-out'), zFit = $('#btn-fit');
   if (zIn) zIn.addEventListener('click', () => zoomAt(canvasW / 2, canvasH / 2, 1.2));
@@ -1505,22 +1765,37 @@ function downloadSVG() {
   const { w: W, h: H } = logicalSize();
   const arr = (state.yStrokes ? state.yStrokes.toArray() : []).slice();
   arr.sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
-  let body = '';
+  let body = '', skipped = 0;
   for (const s of arr) {
     if (s.tool === 'eraser') continue;
+    const esc = t => String(t).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
     if (s.tool === 'text' && s.text) {
       const fs = Math.max(14, Math.min(72, (s.size || 4) * 3));
-      body += `  <text x="${s.points[0][0]}" y="${s.points[0][1]}" font-family="Inter,system-ui,sans-serif" font-weight="600" font-size="${fs}" fill="${s.color}" dominant-baseline="middle">${s.text.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</text>\n`;
-    } else {
+      body += `  <text x="${s.points[0][0]}" y="${s.points[0][1]}" font-family="Inter,system-ui,sans-serif" font-weight="600" font-size="${fs}" fill="${s.color}" dominant-baseline="middle">${esc(s.text)}</text>\n`;
+    } else if (SHAPES.has(s.tool)) {
+      const [a, b] = s.points;
+      const sw = s.size, col = s.color;
+      if (s.tool === 'line') body += `  <line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${col}" stroke-width="${sw}" stroke-linecap="round"/>\n`;
+      else if (s.tool === 'rect') body += `  <rect x="${Math.min(a[0],b[0])}" y="${Math.min(a[1],b[1])}" width="${Math.abs(b[0]-a[0])}" height="${Math.abs(b[1]-a[1])}" stroke="${col}" stroke-width="${sw}" fill="none" stroke-linejoin="round"/>\n`;
+      else { const cx=(a[0]+b[0])/2, cy=(a[1]+b[1])/2, rx=Math.abs(b[0]-a[0])/2, ry=Math.abs(b[1]-a[1])/2; body += `  <ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" stroke="${col}" stroke-width="${sw}" fill="none"/>\n`; }
+    } else if (s.tool === 'pen' || s.tool === 'pencil' || s.tool === 'marker' || s.tool === 'watercolor' || s.tool === 'neon') {
       const d = strokeToPath(s);
       if (!d) continue;
-      body += `  <path d="${d}" stroke="${s.color}" stroke-width="${s.size}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>\n`;
+      let w = s.size, op = 1, extra = '';
+      if (s.tool === 'pencil') { w = s.size * 0.8; op = 0.55; }
+      else if (s.tool === 'marker') { w = s.size * 1.7; op = 0.35; extra = ' stroke-linecap="square"'; }
+      else if (s.tool === 'watercolor') { w = s.size * 1.3; op = 0.18; }
+      else if (s.tool === 'neon') { extra = ` filter="url(#neon)"`; }
+      body += `  <path d="${d}" stroke="${s.color}" stroke-width="${w}" fill="none" opacity="${op}" stroke-linecap="round" stroke-linejoin="round"${extra}/>\n`;
+    } else {
+      skipped++;   // spray/scratch — растровые, в SVG не выгружаются (есть PNG)
     }
   }
   if (!body) { showToast('Пусто — нечего выгружать', '', 1600); return; }
+  const defs = body.includes('url(#neon)') ? `  <defs><filter id="neon" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${Math.round((state.size||4)*1.2)}"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>\n` : '';
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">\n` +
-    `  <rect width="${W}" height="${H}" fill="#11161f"/>\n` + body + `</svg>`;
+    `  <rect width="${W}" height="${H}" fill="#11161f"/>\n` + defs + body + `</svg>`;
   const blob = new Blob([svg], { type: 'image/svg+xml' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -1528,7 +1803,7 @@ function downloadSVG() {
   link.href = url;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  showToast('SVG скачан', 'success', 1400);
+  showToast(skipped > 0 ? `SVG скачан (${skipped} растровых кистей пропущено — используйте PNG)` : 'SVG скачан', 'success', 1800);
 }
 
 // ============ Debug-бар: диагностика Realtime sync + presence ============
