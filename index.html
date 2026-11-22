@@ -157,6 +157,16 @@
   .share-row button{background:var(--bg-3);border:1px solid var(--border);color:var(--text);
     padding:6px 10px;border-radius:8px;font-size:.78rem;cursor:pointer;font-weight:600;flex-shrink:0}
   .share-row button:hover{background:var(--cyan);color:#0a0d12;border-color:var(--cyan)}
+  .share-actions{display:flex;gap:10px;margin-top:14px}
+  .share-actions .btn{flex:1}
+  .install-row{display:flex;justify-content:center;margin-top:14px}
+  .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text-dim);font-size:.85rem;padding:8px 14px;text-decoration:none}
+  .btn-ghost:hover{color:var(--cyan);border-color:var(--cyan)}
+  .install-steps{display:flex;flex-direction:column;gap:10px;margin:6px 0 18px;text-align:left}
+  .install-steps .step{display:flex;gap:10px;align-items:flex-start;background:var(--bg-2);border:1px solid var(--border-soft);border-radius:9px;padding:10px 12px}
+  .install-steps .step .n{flex-shrink:0;width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,var(--cyan),var(--magenta));color:#0a0d12;font-weight:700;font-size:.8rem;display:flex;align-items:center;justify-content:center}
+  .install-steps .step .t{font-size:.9rem;line-height:1.45}
+  .install-steps .step .t b{color:var(--cyan)}
   #qr-wrap{display:flex;justify-content:center;margin:18px 0;background:#fff;padding:14px;border-radius:12px}
   #qr-wrap canvas,#qr-wrap img{display:block;border-radius:4px}
   .modal .btn{margin-top:6px}
@@ -264,6 +274,36 @@
     box-shadow:var(--glow-cyan)}
   .tool-btn svg{width:20px;height:20px}
   .tool-btn[disabled]{opacity:.35;cursor:not-allowed}
+
+  /* Кнопка-триггер кистей + палитра */
+  .brush-group{position:relative}
+  .brush-trigger{display:flex;align-items:center;gap:6px;padding:0 10px 0 8px;min-width:auto}
+  .brush-trigger .brush-icon{font-size:18px;line-height:1}
+  .brush-trigger .brush-name{font-size:.82rem;font-weight:600;white-space:nowrap}
+  .brush-trigger .caret{width:14px;height:14px;opacity:.7;transition:.2s}
+  .brush-trigger.open .caret{transform:rotate(180deg)}
+  .brush-palette{
+    position:absolute;bottom:calc(100% + 8px);left:0;z-index:40;
+    background:var(--bg-1);border:1px solid var(--border);border-radius:12px;
+    box-shadow:var(--shadow);padding:10px;width:280px;
+    display:none;grid-template-columns:1fr;gap:6px
+  }
+  .brush-palette.show{display:block}
+  .palette-label{font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text-mute);margin:4px 2px 2px}
+  .palette-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+  .palette-item{
+    display:flex;flex-direction:column;align-items:center;gap:3px;
+    background:var(--bg-2);border:1px solid var(--border);border-radius:9px;
+    padding:8px 4px;cursor:pointer;color:var(--text-dim);transition:.12s;min-width:0
+  }
+  .palette-item:hover{background:var(--bg-3);color:var(--text)}
+  .palette-item.active{background:linear-gradient(135deg,var(--cyan),var(--magenta));color:#0a0d12;border-color:transparent}
+  .palette-item .pi-ico{font-size:18px;line-height:1}
+  .palette-item span:last-child{font-size:.7rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+  @media (max-width:640px){
+    .brush-palette{width:min(86vw,300px);left:6px}
+    .brush-trigger .brush-name{display:none}   /* на телефоне — только иконка кисти */
+  }
 
   /* «⋯ Ещё» — поповер с редкими действиями (undo/redo/download/clear/слой) */
   .more-menu{
@@ -457,7 +497,7 @@
     <div id="pane-join" class="pane" hidden>
       <div class="field">
         <label for="join-code">Код комнаты</label>
-        <input id="join-code" type="text" maxlength="12" placeholder="CS-XXXX" autocomplete="off" style="text-transform:uppercase;font-family:ui-monospace,Menlo,monospace;letter-spacing:.05em">
+        <input id="join-code" type="text" maxlength="40" placeholder="Код CS-XXXX или ссылка" autocomplete="off" style="text-transform:uppercase;font-family:ui-monospace,Menlo,monospace;letter-spacing:.05em">
       </div>
       <div class="field">
         <label for="join-nick">Ваш никнейм (необязательно)</label>
@@ -477,6 +517,11 @@
     </div>
 
     <p class="hint">Живой режим — через <b>P2P WebRTC</b> напрямую между устройствами, сигналинг и хранение — на <b>Supabase</b>. <b>Рисунок не теряется</b>, когда вы закрываете приложение: один нарисовал заметку, второй открыл ту же ссылку позже — и увидел её. Без регистрации.</p>
+
+    <div class="install-row">
+      <button id="btn-install-ios" class="btn btn-ghost" hidden>📲 Установить на iPhone</button>
+      <a id="btn-install-other" class="btn btn-ghost" href="#install" hidden>📲 Установить приложение</a>
+    </div>
 
     <div class="recent-rooms" id="recent-rooms" hidden>
       <div class="recent-title">Недавние заметки</div>
@@ -501,7 +546,19 @@
     </div>
     <div id="qr-wrap"></div>
     <p class="hint" id="share-hint">Покажите код или QR второму человеку. На телефоне QR удобно сканировать камерой.</p>
-    <button id="share-close" class="btn btn-primary">Готово</button>
+    <div class="share-actions">
+      <button id="btn-native-share" class="btn btn-primary" hidden>📤 Поделиться ссылкой</button>
+      <button id="share-close" class="btn btn-primary">Готово</button>
+    </div>
+  </div>
+</div>
+
+<!-- Установка приложения на главный экран (PWA) -->
+<div id="install-modal" class="modal-backdrop">
+  <div class="modal">
+    <h3>Установить CatScribbles</h3>
+    <div id="install-steps" class="install-steps"></div>
+    <button id="install-close" class="btn btn-primary">Понятно</button>
   </div>
 </div>
 
@@ -555,10 +612,33 @@
 
   <!-- Тулбар -->
   <div class="toolbar" id="toolbar">
-    <div class="tool-group">
-      <button class="tool-btn active" data-tool="pen" title="Перо">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>
+    <div class="tool-group brush-group">
+      <button class="tool-btn brush-trigger active" id="btn-brushes" title="Выбрать кисть">
+        <span class="brush-icon" id="brush-icon">✏️</span>
+        <span class="brush-name" id="brush-name">Перо</span>
+        <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
       </button>
+      <div class="brush-palette" id="brush-palette">
+        <div class="palette-label">Кисти</div>
+        <div class="palette-grid">
+          <button class="palette-item active" data-tool="pen"><span class="pi-ico">✏️</span><span>Перо</span></button>
+          <button class="palette-item" data-tool="pencil"><span class="pi-ico">✎</span><span>Карандаш</span></button>
+          <button class="palette-item" data-tool="marker"><span class="pi-ico">🖊️</span><span>Маркер</span></button>
+          <button class="palette-item" data-tool="watercolor"><span class="pi-ico">🎨</span><span>Акварель</span></button>
+          <button class="palette-item" data-tool="spray"><span class="pi-ico">🌫️</span><span>Баллончик</span></button>
+          <button class="palette-item" data-tool="scratch"><span class="pi-ico">✸</span><span>Царапины</span></button>
+          <button class="palette-item" data-tool="neon"><span class="pi-ico">✨</span><span>Неон</span></button>
+        </div>
+        <div class="palette-label">Фигуры</div>
+        <div class="palette-grid">
+          <button class="palette-item" data-tool="line"><span class="pi-ico">╱</span><span>Линия</span></button>
+          <button class="palette-item" data-tool="rect"><span class="pi-ico">▭</span><span>Прямоуг.</span></button>
+          <button class="palette-item" data-tool="ellipse"><span class="pi-ico">◯</span><span>Эллипс</span></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tool-group">
       <button class="tool-btn" data-tool="eraser" title="Ластик">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H7L3 16a2 2 0 0 1 0-3l9-9a2 2 0 0 1 3 0l6 6a2 2 0 0 1 0 3l-7 7"/><path d="M9 11l5 5"/></svg>
       </button>
@@ -659,6 +739,6 @@ if ('serviceWorker' in navigator) {
   });
 }
 </script>
-<script type="module" src="./app.js?v=15"></script>
+<script type="module" src="./app.js?v=16"></script>
 </body>
 </html>
