@@ -159,6 +159,8 @@
   .share-row button:hover{background:var(--cyan);color:#0a0d12;border-color:var(--cyan)}
   .share-actions{display:flex;gap:10px;margin-top:14px}
   .share-actions .btn{flex:1}
+  .share-status{margin:10px 0 0;padding:10px 12px;border-radius:9px;font-size:.85rem;line-height:1.45;border:1px solid var(--border-soft);background:rgba(255,184,0,.12);color:#ffd25a}
+  .share-status.ok{background:rgba(0,255,136,.10);color:#7fffb0;border-color:rgba(0,255,136,.3)}
   .install-row{display:flex;justify-content:center;margin-top:14px}
   .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text-dim);font-size:.85rem;padding:8px 14px;text-decoration:none}
   .btn-ghost:hover{color:var(--cyan);border-color:var(--cyan)}
@@ -569,6 +571,7 @@
     </div>
     <div id="qr-wrap"></div>
     <p class="hint" id="share-hint">Покажите код или QR второму человеку. На телефоне QR удобно сканировать камерой.</p>
+    <div id="share-status" class="share-status" hidden></div>
     <div class="share-actions">
       <button id="btn-native-share" class="btn btn-primary" hidden>📤 Поделиться ссылкой</button>
       <button id="share-close" class="btn btn-primary">Готово</button>
@@ -806,7 +809,7 @@ if ('serviceWorker' in navigator) {
 }
 </script>
 <!-- supabase-js: локальный UMD (window.supabase) — без внешнего CDN -->
-<script src="./vendor/supabase.umd.min.js?v=19"></script>
-<script type="module" src="./app.js?v=19"></script>
+<script src="./vendor/supabase.umd.min.js?v=20"></script>
+<script type="module" src="./app.js?v=20"></script>
 </body>
 </html>
