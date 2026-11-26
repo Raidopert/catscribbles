@@ -10,9 +10,38 @@
 // поэтому sync, awareness и presence — всё через Supabase Realtime (server-relayed).
 // ====================================================================
 
-import * as Y from 'https://esm.sh/yjs@13.6.21';
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import QRCode from 'https://esm.sh/qrcode@1.5.4';
+// Зависимости вендорены локально (./vendor/) — никаких внешних CDN для модулей.
+// В РФ esm.sh/telegram.org часто режутся VPN-блокировками → приложение не грузилось.
+// supabase-js — UMD-скриптом в index.html (window.supabase), jspdf — lazy (loadJsPDF).
+import * as Y from './vendor/yjs.js?v=19';
+import QRCode from './vendor/qrcode.js?v=19';
+const supabaseLib = window.supabase;
+if (!supabaseLib || typeof supabaseLib.createClient !== 'function') {
+  throw new Error('Supabase SDK не загрузился (vendor/supabase.umd.min.js). Обновите страницу.');
+}
+const { createClient } = supabaseLib;
+
+// Lazy-загрузка тяжёлых UMD-библиек локальным <script> (без внешних CDN).
+// jspdf (365KB) нужен только при экспорте PDF — не грузим его на старте.
+function lazyScript(src, globalCheck, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    if (globalCheck()) return resolve();
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    s.onload = () => { if (globalCheck()) resolve(); else reject(new Error(`${src}: loaded but global missing`)); };
+    s.onerror = () => reject(new Error(`${src} не загрузился`));
+    document.head.appendChild(s);
+    setTimeout(() => { if (globalCheck()) resolve(); else reject(new Error(`${src} timeout`)); }, timeoutMs);
+  });
+}
+let _jspdfPromise = null;
+function loadJsPDF() {
+  if (_jspdfPromise) return _jspdfPromise;
+  _jspdfPromise = lazyScript('./vendor/jspdf.umd.min.js?v=19', () => window.jspdf && window.jspdf.jsPDF)
+    .then(() => window.jspdf.jsPDF)
+    .catch(e => { _jspdfPromise = null; throw e; });
+  return _jspdfPromise;
+}
 
 // ============ Константы ============
 const APP_ID = 'raidopert.catscribbles.v1';
@@ -2180,7 +2209,7 @@ async function downloadPDF() {
   const arr = (state.yStrokes.toArray() || []).slice().sort((a, b) => (a.layer || 0) - (b.layer || 0) || (a.ts || 0) - (b.ts || 0));
   for (const s of arr) drawStroke(octx, s);
   try {
-    const { jsPDF } = await import('https://esm.sh/jspdf@2.5.2');
+    const jsPDF = await loadJsPDF();
     const orient = bb.w >= bb.h ? 'l' : 'p';
     const pdf = new jsPDF({ orientation: orient, unit: 'pt', format: [Math.round(bb.w), Math.round(bb.h)] });
     pdf.addImage(out.toDataURL('image/png'), 'PNG', 0, 0, Math.round(bb.w), Math.round(bb.h));
@@ -2196,8 +2225,19 @@ async function downloadPDF() {
 // Приложение работает как Telegram WebApp: SDK грузится в index.html (no-op вне TG).
 function tgWebApp() { return (window.Telegram && window.Telegram.WebApp) || null; }
 function isTelegram() { return !!tgWebApp(); }
-function setupTelegram() {
-  const tg = tgWebApp(); if (!tg) return;
+// TG SDK грузим динамически ТОЛЬКО внутри Telegram WebView (UA содержит 'Telegram').
+// В обычном браузере (и в РФ без VPN) telegram.org заблокирован — не пытаемся, не блокируем старт.
+function tgLikely() { return /Telegram/i.test(navigator.userAgent || ''); }
+function loadTelegramSDK(timeoutMs = 4000) {
+  return lazyScript('https://telegram.org/js/telegram-web-app.js', () => window.Telegram && window.Telegram.WebApp, timeoutMs);
+}
+async function setupTelegram() {
+  if (!tgLikely()) return;                              // не в TG — не дёргаем заблокированный домен
+  let tg = tgWebApp();
+  if (!tg) {
+    try { await loadTelegramSDK(); } catch (_) { return; }  // SDK не загрузился — тихо выходим
+    tg = tgWebApp(); if (!tg) return;
+  }
   tg.ready(); tg.expand();
   // тема TG → CSS-переменные (тёмная/светлая + акцент)
   const tp = tg.themeParams || {};
