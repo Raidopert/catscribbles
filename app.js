@@ -13,8 +13,8 @@
 // Зависимости вендорены локально (./vendor/) — никаких внешних CDN для модулей.
 // В РФ esm.sh/telegram.org часто режутся VPN-блокировками → приложение не грузилось.
 // supabase-js — UMD-скриптом в index.html (window.supabase), jspdf — lazy (loadJsPDF).
-import * as Y from './vendor/yjs.js?v=19';
-import QRCode from './vendor/qrcode.js?v=19';
+import * as Y from './vendor/yjs.js?v=20';
+import QRCode from './vendor/qrcode.js?v=20';
 const supabaseLib = window.supabase;
 if (!supabaseLib || typeof supabaseLib.createClient !== 'function') {
   throw new Error('Supabase SDK не загрузился (vendor/supabase.umd.min.js). Обновите страницу.');
@@ -37,7 +37,7 @@ function lazyScript(src, globalCheck, timeoutMs = 12000) {
 let _jspdfPromise = null;
 function loadJsPDF() {
   if (_jspdfPromise) return _jspdfPromise;
-  _jspdfPromise = lazyScript('./vendor/jspdf.umd.min.js?v=19', () => window.jspdf && window.jspdf.jsPDF)
+  _jspdfPromise = lazyScript('./vendor/jspdf.umd.min.js?v=20', () => window.jspdf && window.jspdf.jsPDF)
     .then(() => window.jspdf.jsPDF)
     .catch(e => { _jspdfPromise = null; throw e; });
   return _jspdfPromise;
@@ -145,6 +145,7 @@ const state = {
   yMeta: null,       // Y.Map: { hostId, mode, currentTurn, turnOrder }
   roomId: null,
   roomCode: null,
+  snapshotDropped: false,  // рисунок не влез в ссылку (>1800 символов) — показываем предупреждение
   userId: localUserId(),    // персистентный id (localStorage) — замена Trystero selfId
   nick: '',
   userColor: USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)],
@@ -334,6 +335,21 @@ async function openShareModal() {
       : 'Покажите код или QR второму человеку. На телефоне QR удобно сканировать камерой.';
   }
   shareModal.classList.add('show');
+  // Баннер статуса сохранения: объясняет, дойдёт ли рисунок по ссылке.
+  const statusEl = document.getElementById('share-status');
+  if (statusEl) {
+    const dbOk = state.persistStats && state.persistStats.save === 'ok';
+    if (dbOk) {
+      statusEl.hidden = false; statusEl.className = 'share-status ok';
+      statusEl.textContent = '✓ Рисунок сохранён на сервере — ссылка короткая, друг увидит его даже после вашего ухода.';
+    } else if (state.snapshotDropped) {
+      statusEl.hidden = false; statusEl.className = 'share-status';
+      statusEl.innerHTML = '⚠ Сервер сохранения недоступен (возможно, Supabase заблокирован в вашей сети), а рисунок слишком большой для ссылки. <b>Совместный режим в реальном времени может не работать.</b> Передайте код комнаты — он работает, пока оба онлайн. Если приложение не грузится у друга — пусть включит VPN.';
+    } else {
+      statusEl.hidden = false; statusEl.className = 'share-status';
+      statusEl.innerHTML = '⚠ Сервер сохранения недоступен (возможно, Supabase заблокирован в вашей сети). Рисунок зашит в ссылку как фолбэк — но <b>совместный режим в реальном времени может не работать.</b> Если у друга не грузится — пусть включит VPN и обновит страницу.';
+    }
+  }
   // В Telegram — дополнительная кнопка шеринга в чат.
   const old = document.getElementById('tg-share-row'); if (old) old.remove();
   const tgBtn = tgShareButton(link);
@@ -520,9 +536,20 @@ function updateHashWithSnapshot() {
   // Если БД жива (save=ok) — ссылка остаётся короткой (#room=CS-XXXXXX), а рисунок
   // подгружается с сервера при открытии. Так QR/ссылка не разбухают.
   const dbOk = state.persistStats && state.persistStats.save === 'ok';
+  state.snapshotDropped = false;
   if (strokes > 0 && !dbOk) {
     const snap = encodeSnapshot();
-    if (snap) hash += '&d=' + snap;
+    if (snap) {
+      // Кап длины: если ссылка с d= превышает 1800 символов — не зашиваем рисунок
+      // (длинные URL режутся мессенджерами/браузерами → ссылка ломается).
+      // Ссылка остаётся короткой (#room=CS-XXXX),live-sync работает, если оба онлайн.
+      const fullUrl = location.origin + location.pathname + '#' + hash + '&d=' + snap;
+      if (fullUrl.length <= 1800) {
+        hash += '&d=' + snap;
+      } else {
+        state.snapshotDropped = true;
+      }
+    }
   }
   const cur = location.hash.startsWith('#') ? location.hash.slice(1) : location.hash;
   if (cur !== hash) {
