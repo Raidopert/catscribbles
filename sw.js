@@ -1,7 +1,7 @@
 // CatScribbles service worker — офлайн-оболочка + stale-while-revalidate.
 // Данные (Supabase Realtime/REST) всегда идут в сеть; кэшируется только
 // оболочка (index.html, app.js) и локальные модули (./vendor/* — без внешних CDN).
-const CACHE = 'catscribbles-v5';
+const CACHE = 'catscribbles-v6';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './vendor/supabase.umd.min.js', './vendor/yjs.js', './vendor/qrcode.js'];
 
 self.addEventListener('install', e => {
